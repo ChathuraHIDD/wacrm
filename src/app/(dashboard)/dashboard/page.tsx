@@ -13,6 +13,7 @@ import {
 
 import {
   loadActivity,
+  loadAgentLeaderboard,
   loadConversationsSeries,
   loadMetrics,
   loadPipelineDonut,
@@ -20,11 +21,13 @@ import {
 } from '@/lib/dashboard/queries'
 import type {
   ActivityItem,
+  AgentLeaderboard as AgentLeaderboardData,
   ConversationsSeriesPoint,
   MetricsBundle,
   PipelineDonutData,
   ResponseTimeSummary,
 } from '@/lib/dashboard/types'
+import { canEditSettings } from '@/lib/auth/roles'
 
 import { MetricCard } from '@/components/dashboard/metric-card'
 import { SkeletonCard } from '@/components/dashboard/skeleton'
@@ -33,6 +36,7 @@ import { ConversationsChart } from '@/components/dashboard/conversations-chart'
 import { PipelineDonut } from '@/components/dashboard/pipeline-donut'
 import { ResponseTimeChart } from '@/components/dashboard/response-time-chart'
 import { ActivityFeed } from '@/components/dashboard/activity-feed'
+import { AgentLeaderboard } from '@/components/dashboard/agent-leaderboard'
 
 import { useTranslations } from 'next-intl'
 
@@ -40,7 +44,11 @@ type RangeDays = 7 | 30 | 90
 
 export default function DashboardPage() {
   const t = useTranslations('Dashboard.page')
-  const { defaultCurrency } = useAuth()
+  const { defaultCurrency, accountRole } = useAuth()
+  // The leaderboard compares teammates, so it's an admin/owner view —
+  // matches the "admin oversight" intent and keeps relative
+  // performance out of an individual agent's dashboard.
+  const canSeeLeaderboard = accountRole ? canEditSettings(accountRole) : false
   const [metrics, setMetrics] = useState<MetricsBundle | null>(null)
   const [metricsLoading, setMetricsLoading] = useState(true)
 
@@ -63,6 +71,9 @@ export default function DashboardPage() {
 
   const [activity, setActivity] = useState<ActivityItem[] | null>(null)
   const [activityLoading, setActivityLoading] = useState(true)
+
+  const [leaderboard, setLeaderboard] = useState<AgentLeaderboardData | null>(null)
+  const [leaderboardLoading, setLeaderboardLoading] = useState(true)
 
   const loadAll = useCallback(() => {
     const db = createClient()
@@ -102,6 +113,18 @@ export default function DashboardPage() {
   useEffect(() => {
     loadAll()
   }, [loadAll])
+
+  // Leaderboard loads separately — it's gated on the account role,
+  // which resolves a tick after the first render. Only owners/admins
+  // ever render the panel, so the non-eligible path just no-ops and
+  // leaves the (unused) loading flag as-is.
+  useEffect(() => {
+    if (!canSeeLeaderboard) return
+    void loadAgentLeaderboard(createClient(), 30)
+      .then((l) => setLeaderboard(l))
+      .catch((err) => console.error('[dashboard] leaderboard failed:', err))
+      .finally(() => setLeaderboardLoading(false))
+  }, [canSeeLeaderboard])
 
   // Range switch handler — kept in an event callback (not an effect)
   // so the setState calls stay out of the react-hooks/set-state-in-effect
@@ -218,6 +241,15 @@ export default function DashboardPage() {
 
       {/* Response time */}
       <ResponseTimeChart data={responseTime} loading={responseTimeLoading} />
+
+      {/* Per-agent leaderboard — admin / owner only */}
+      {canSeeLeaderboard && (
+        <AgentLeaderboard
+          data={leaderboard}
+          loading={leaderboardLoading}
+          currency={defaultCurrency}
+        />
+      )}
 
       {/* Activity feed */}
       <ActivityFeed items={activity} loading={activityLoading} />

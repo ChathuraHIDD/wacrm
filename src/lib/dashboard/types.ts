@@ -48,6 +48,37 @@ export interface ResponseTimeSummary {
   lastWeekAvg: number | null
 }
 
+export interface AgentLeaderboardRow {
+  /** auth.users id of the agent. */
+  userId: string
+  /** Display name (falls back to email, then a short id). */
+  name: string
+  /** Open conversations currently assigned to this agent. */
+  openConversations: number
+  /** Conversations ever assigned to this agent (any status). */
+  totalAssigned: number
+  /** Messages this agent sent in the selected window. */
+  messagesSent: number
+  /** Deals marked "won" attributed to this agent (lifetime). */
+  dealsWon: number
+  /** Summed value of those won deals. */
+  dealsWonValue: number
+  /** Mean first-response time (minutes) for replies this agent sent. */
+  avgResponseMinutes: number | null
+}
+
+export interface AgentLeaderboard {
+  rows: AgentLeaderboardRow[]
+  /** Window the message / deal counts cover. */
+  rangeDays: number
+  /**
+   * True once at least one message in the window carries a `sender_id`.
+   * Older messages predate per-agent attribution, so a fresh install
+   * shows a hint instead of a misleading all-zero "messages sent".
+   */
+  hasAttributedMessages: boolean
+}
+
 export type ActivityKind =
   | 'message'
   | 'deal'

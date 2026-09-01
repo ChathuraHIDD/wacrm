@@ -165,6 +165,9 @@ export async function POST(request: Request) {
         templateMessageParams: template_message_params,
         interactivePayload: interactive_payload,
         replyToMessageId: reply_to_message_id,
+        // Attribute the send to the signed-in agent for dashboard
+        // reporting (the per-agent leaderboard).
+        senderId: userId,
       })
 
       return NextResponse.json({

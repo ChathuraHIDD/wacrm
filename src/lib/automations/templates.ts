@@ -10,6 +10,7 @@ export type TemplateSlug =
   | 'out_of_office'
   | 'lead_qualifier'
   | 'follow_up_reminder'
+  | 'round_robin_leads'
 
 export interface TemplateStepSeed {
   step_type: AutomationStepType
@@ -122,6 +123,20 @@ export const AUTOMATION_TEMPLATES: Record<TemplateSlug, AutomationTemplateDefini
           text:
             "Just circling back — did you have any other questions for us? Happy to help!",
         },
+      },
+    ],
+  },
+  round_robin_leads: {
+    slug: 'round_robin_leads',
+    name: 'Round-robin New Leads',
+    description:
+      'Share every new lead evenly across the team — the agent with the lightest open load takes the next conversation.',
+    trigger_type: 'first_inbound_message',
+    trigger_config: {},
+    steps: [
+      {
+        step_type: 'assign_conversation',
+        step_config: { mode: 'round_robin' },
       },
     ],
   },

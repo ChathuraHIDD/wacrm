@@ -128,6 +128,21 @@
       "noReplies": "No replies recorded yet",
       "noRepliesHint": "This chart fills in as you reply to customer messages."
     },
+    "agentLeaderboard": {
+      "title": "Agent Leaderboard",
+      "subtitle": "Replies over the last {days} days · deals won all-time",
+      "colAgent": "Agent",
+      "colOpen": "Open",
+      "colReplies": "Replies",
+      "colResponse": "Avg response",
+      "colWon": "Deals won",
+      "colValue": "Won value",
+      "empty": "No agents yet",
+      "emptyHint": "Invite your team from Settings → Members, then assign conversations to them.",
+      "attributionHint": "Reply counts build up from each agent's next sent message.",
+      "minutesShort": "{min}m",
+      "hoursShort": "{hr}h"
+    },
     "emptyState": {
       "title": "Not enough data yet"
     }

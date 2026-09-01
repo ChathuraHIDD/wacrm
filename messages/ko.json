@@ -128,6 +128,21 @@
       "noReplies": "아직 기록된 응답이 없습니다",
       "noRepliesHint": "고객 메시지에 답변하면 이 차트가 채워집니다."
     },
+    "agentLeaderboard": {
+      "title": "상담원 리더보드",
+      "subtitle": "답장은 최근 {days}일 기준 · 성사된 딜은 전체 기간",
+      "colAgent": "상담원",
+      "colOpen": "진행 중",
+      "colReplies": "답장",
+      "colResponse": "평균 응답",
+      "colWon": "성사된 딜",
+      "colValue": "성사 금액",
+      "empty": "아직 상담원이 없습니다",
+      "emptyHint": "설정 → 멤버에서 팀을 초대한 뒤 대화를 배정하세요.",
+      "attributionHint": "답장 수는 각 상담원이 다음 메시지를 보낸 시점부터 집계됩니다.",
+      "minutesShort": "{min}분",
+      "hoursShort": "{hr}시간"
+    },
     "emptyState": {
       "title": "아직 데이터가 충분하지 않습니다"
     }

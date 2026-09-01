@@ -9,6 +9,8 @@ import {
 } from './date-utils'
 import type {
   ActivityItem,
+  AgentLeaderboard,
+  AgentLeaderboardRow,
   ConversationsSeriesPoint,
   MetricsBundle,
   PipelineDonutData,
@@ -261,6 +263,152 @@ export async function loadResponseTime(db: DB): Promise<ResponseTimeSummary> {
     thisWeekAvg: avg(thisWeekMins),
     lastWeekAvg: avg(lastWeekMins),
   }
+}
+
+// --- 4b. Per-agent leaderboard ---------------------------------------
+//
+// "Who is replying, and who is winning the lead" — one row per
+// assignable team member (owner / admin / agent). RLS already scopes
+// every table below to the caller's account. All aggregation is
+// client-side, consistent with the rest of this file.
+
+const ASSIGNABLE_LEADERBOARD_ROLES = ['owner', 'admin', 'agent']
+
+export async function loadAgentLeaderboard(
+  db: DB,
+  rangeDays = 30,
+): Promise<AgentLeaderboard> {
+  const start = daysAgoStart(rangeDays - 1).toISOString()
+
+  const [membersRes, convRes, msgRes, dealsRes] = await Promise.all([
+    db
+      .from('profiles')
+      .select('id, user_id, full_name, email, account_role')
+      .in('account_role', ASSIGNABLE_LEADERBOARD_ROLES),
+    db.from('conversations').select('assigned_agent_id, status'),
+    db
+      .from('messages')
+      .select('conversation_id, sender_type, sender_id, created_at')
+      .gte('created_at', start)
+      .order('conversation_id', { ascending: true })
+      .order('created_at', { ascending: true }),
+    // Won deals are counted lifetime — "who has closed leads" is a
+    // standing score, not a 30-day window. Reply counts below stay
+    // windowed so the board reflects recent activity.
+    db.from('deals').select('assigned_to, user_id, value, status').eq('status', 'won'),
+  ])
+
+  const members = (membersRes.data ?? []) as {
+    id: string
+    user_id: string
+    full_name: string | null
+    email: string | null
+    account_role: string
+  }[]
+
+  // profiles.id -> auth.users id, so a deal's `assigned_to`
+  // (FK to profiles.id) can be folded onto the same agent key.
+  const profileIdToUser = new Map<string, string>()
+  for (const m of members) profileIdToUser.set(m.id, m.user_id)
+
+  const rows = new Map<string, AgentLeaderboardRow>()
+  for (const m of members) {
+    rows.set(m.user_id, {
+      userId: m.user_id,
+      name: m.full_name?.trim() || m.email || `Agent ${m.user_id.slice(0, 8)}`,
+      openConversations: 0,
+      totalAssigned: 0,
+      messagesSent: 0,
+      dealsWon: 0,
+      dealsWonValue: 0,
+      avgResponseMinutes: null,
+    })
+  }
+
+  for (const c of (convRes.data ?? []) as {
+    assigned_agent_id: string | null
+    status: string
+  }[]) {
+    if (!c.assigned_agent_id) continue
+    const row = rows.get(c.assigned_agent_id)
+    if (!row) continue
+    row.totalAssigned += 1
+    if (c.status === 'open') row.openConversations += 1
+  }
+
+  for (const d of (dealsRes.data ?? []) as {
+    assigned_to: string | null
+    user_id: string | null
+    value: number | null
+  }[]) {
+    const userId =
+      (d.assigned_to && profileIdToUser.get(d.assigned_to)) || d.user_id
+    if (!userId) continue
+    const row = rows.get(userId)
+    if (!row) continue
+    row.dealsWon += 1
+    row.dealsWonValue += d.value ?? 0
+  }
+
+  // Messages: per-agent count + first-response time. Walk each
+  // conversation in order, pair an unanswered customer message with
+  // the next outbound message and credit that message's sender.
+  const msgs = (msgRes.data ?? []) as {
+    conversation_id: string
+    sender_type: string
+    sender_id: string | null
+    created_at: string
+  }[]
+  const responseMins = new Map<string, number[]>()
+  let hasAttributedMessages = false
+  let currentConv = ''
+  let pendingCustomerAt: Date | null = null
+  for (const m of msgs) {
+    if (m.conversation_id !== currentConv) {
+      currentConv = m.conversation_id
+      pendingCustomerAt = null
+    }
+    if (m.sender_type === 'customer') {
+      if (!pendingCustomerAt) pendingCustomerAt = new Date(m.created_at)
+      continue
+    }
+    // agent / bot outbound
+    if (m.sender_id) {
+      hasAttributedMessages = true
+      const row = rows.get(m.sender_id)
+      if (row) {
+        row.messagesSent += 1
+        if (pendingCustomerAt) {
+          const mins =
+            (new Date(m.created_at).getTime() - pendingCustomerAt.getTime()) /
+            60_000
+          if (mins >= 0) {
+            const arr = responseMins.get(m.sender_id) ?? []
+            arr.push(mins)
+            responseMins.set(m.sender_id, arr)
+          }
+        }
+      }
+    }
+    pendingCustomerAt = null
+  }
+
+  for (const [userId, arr] of responseMins) {
+    const row = rows.get(userId)
+    if (row && arr.length > 0) {
+      row.avgResponseMinutes = arr.reduce((a, b) => a + b, 0) / arr.length
+    }
+  }
+
+  const ordered = [...rows.values()].sort(
+    (a, b) =>
+      b.dealsWonValue - a.dealsWonValue ||
+      b.dealsWon - a.dealsWon ||
+      b.messagesSent - a.messagesSent ||
+      a.name.localeCompare(b.name),
+  )
+
+  return { rows: ordered, rangeDays, hasAttributedMessages }
 }
 
 // --- 5. Activity feed --------------------------------------------------
