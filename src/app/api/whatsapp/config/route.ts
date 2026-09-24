@@ -21,6 +21,7 @@ import {
   phoneNumberBelongsToWaba,
 } from '@/lib/whatsapp/waba-pairing'
 import { encrypt, decrypt } from '@/lib/whatsapp/encryption'
+import { canEditSettings, isAccountRole } from '@/lib/auth/roles'
 
 /**
  * Resolve the caller's account_id from their profile. Inlined here
@@ -43,6 +44,26 @@ async function resolveAccountId(
     .maybeSingle()
   if (error || !data?.account_id) return null
   return data.account_id as string
+}
+
+/**
+ * True iff the caller may change the account's WhatsApp connection
+ * (owner / admin). RLS already blocks a non-admin's `whatsapp_config`
+ * write, but POST talks to Meta — verify, subscribe, and register the
+ * number with a PIN — BEFORE it persists, so RLS alone would still let
+ * an agent re-register the company number. Gate up front instead.
+ */
+async function callerCanEditSettings(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  userId: string,
+): Promise<boolean> {
+  const { data } = await supabase
+    .from('profiles')
+    .select('account_role')
+    .eq('user_id', userId)
+    .maybeSingle()
+  const role: unknown = data?.account_role
+  return isAccountRole(role) && canEditSettings(role)
 }
 
 // Lazy-initialised service-role client. We need it to detect a
@@ -261,6 +282,13 @@ export async function POST(request: Request) {
     if (!accountId) {
       return NextResponse.json(
         { error: 'Your profile is not linked to an account.' },
+        { status: 403 },
+      )
+    }
+
+    if (!(await callerCanEditSettings(supabase, user.id))) {
+      return NextResponse.json(
+        { error: 'Only an owner or admin can change the WhatsApp connection.' },
         { status: 403 },
       )
     }
@@ -597,6 +625,13 @@ export async function DELETE() {
     if (!accountId) {
       return NextResponse.json(
         { error: 'Your profile is not linked to an account.' },
+        { status: 403 },
+      )
+    }
+
+    if (!(await callerCanEditSettings(supabase, user.id))) {
+      return NextResponse.json(
+        { error: 'Only an owner or admin can change the WhatsApp connection.' },
         { status: 403 },
       )
     }
