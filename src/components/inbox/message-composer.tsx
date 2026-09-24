@@ -109,10 +109,27 @@ interface MediaDraft {
   caption: string;
 }
 
+/**
+ * What a text send reports back. `restoreDraft` puts the text back in
+ * the box — used when Claim & Lock refused the send (another agent took
+ * the customer first), so the agent's typing is never lost.
+ */
+export interface ComposerSendOutcome {
+  restoreDraft?: boolean;
+}
+
 interface MessageComposerProps {
   conversationId: string;
   sessionExpired: boolean;
-  onSend: (text: string, replyToId?: string) => void;
+  /**
+   * Claim & Lock: set when a teammate owns this customer. Disables every
+   * input and says why (the banner above the composer explains more).
+   */
+  lockedMessage?: string | null;
+  onSend: (
+    text: string,
+    replyToId?: string
+  ) => void | Promise<ComposerSendOutcome | void>;
   onSendMedia: (payload: SendMediaPayload) => void;
   onSendInteractive: (payload: InteractiveMessagePayload, replyToId?: string) => void;
   onOpenTemplates: () => void;
@@ -134,6 +151,7 @@ const OPUS_ENCODER_PATH = "/opus/encoderWorker.min.js";
 export function MessageComposer({
   conversationId,
   sessionExpired,
+  lockedMessage = null,
   onSend,
   onSendMedia,
   onSendInteractive,
@@ -188,7 +206,7 @@ export function MessageComposer({
   // For solo users this is always true — single-owner accounts pass
   // every capability — so the disabled branch is a no-op there.
   const canSend = useCan("send-messages");
-  const readOnly = !canSend;
+  const readOnly = !canSend || Boolean(lockedMessage);
   // Media (like free-form text) is only allowed inside the 24h window.
   const inputsDisabled = readOnly || sessionExpired;
 
@@ -226,7 +244,12 @@ export function MessageComposer({
 
     setSending(true);
     try {
-      onSend(trimmed, replyTo?.id);
+      // Not awaited: the box clears instantly (optimistic send). If the
+      // send is refused — a teammate took the customer first — the text
+      // comes back, unless the agent has already started typing again.
+      void Promise.resolve(onSend(trimmed, replyTo?.id)).then((outcome) => {
+        if (outcome?.restoreDraft) setText((current) => current || trimmed);
+      });
       setText("");
       if (textareaRef.current) {
         textareaRef.current.style.height = "auto";
@@ -732,7 +755,9 @@ export function MessageComposer({
             onChange={handleChange}
             onKeyDown={handleKeyDown}
             placeholder={
-              readOnly
+              lockedMessage
+                ? lockedMessage
+                : readOnly
                 ? t("readOnlyPlaceholder")
                 : sessionExpired
                   ? t("sessionExpiredPlaceholder")
@@ -743,7 +768,9 @@ export function MessageComposer({
             // Textarea keeps its own inline title — the GatedButton
             // wrapping pattern doesn't apply to non-button inputs.
             // The placeholder text also surfaces the read-only state.
-            title={readOnly ? t("readOnlyTitle") : undefined}
+            title={
+              lockedMessage ?? (readOnly ? t("readOnlyTitle") : undefined)
+            }
             className={cn(
               "flex-1 resize-none rounded-xl border border-border bg-muted px-4 py-2.5 text-sm text-foreground placeholder-muted-foreground outline-none transition-colors focus:border-primary/50",
               (sessionExpired || readOnly) && "cursor-not-allowed opacity-50"

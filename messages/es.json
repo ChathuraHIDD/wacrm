@@ -259,7 +259,9 @@
       "downloadFailed": "No se pudo descargar el adjunto",
       "viewImage": "Ver imagen",
       "expandVideo": "Ampliar video",
-      "imageAlt": "Imagen compartida"
+      "imageAlt": "Imagen compartida",
+      "adminBadge": "Admin",
+      "adminBadgeTitle": "Enviado por un administrador — el responsable del cliente no cambió"
     },
     "mediaViewer": {
       "counter": "{index} de {total}",
@@ -328,6 +330,40 @@
       "resumed": "IA reanudada.",
       "updateError": "No se pudo actualizar el asistente de IA.",
       "networkError": "No se pudo conectar con el servidor."
+    },
+    "ownership": {
+      "tabUnassigned": "Sin asignar",
+      "tabMine": "Míos",
+      "tabTeam": "Equipo",
+      "tabAll": "Todos",
+      "agentFilter": "Agente",
+      "allAgents": "Todos los agentes",
+      "unassigned": "Sin asignar",
+      "take": "Atender a este cliente",
+      "taking": "Asignando…",
+      "taken": "Ahora atiendes a este cliente",
+      "claimLost": "{owner} ya está atendiendo a este cliente",
+      "sendLost": "{owner} acaba de tomar a este cliente. Tu mensaje no se envió — sigue en el cuadro de respuesta.",
+      "notOwner": "{owner} está atendiendo a este cliente. Tu mensaje no se envió.",
+      "lockedBanner": "🔒 {owner} está atendiendo a este cliente",
+      "lockedHint": "Puedes leer este chat. Solo {owner} o un administrador pueden responder.",
+      "adminReplyHint": "Respondes como administrador — el cliente sigue con {owner}.",
+      "adminUnassignedHint": "Respondes como administrador — el cliente sigue sin asignar.",
+      "ownerLabel": "Responsable: {owner}",
+      "assign": "Asignar",
+      "assignTo": "Asignar a un agente",
+      "transferTo": "Transferir a un agente",
+      "release": "Devolver a Sin asignar",
+      "noAgents": "Aún no hay agentes — invita uno desde Ajustes → Miembros",
+      "assignedTo": "Asignado a {owner}",
+      "released": "Devuelto a Sin asignar",
+      "ownerChangeFailed": "No se pudo cambiar el responsable: {reason}",
+      "takeFailed": "No se pudo tomar a este cliente: {reason}",
+      "anotherAgent": "otro agente",
+      "emptyUnassigned": "No hay clientes sin asignar. ¡Buen trabajo!",
+      "emptyMine": "Aún no atiendes a ningún cliente. Toma uno de Sin asignar.",
+      "emptyTeam": "Tus compañeros no tienen clientes asignados.",
+      "you": "Tú"
     }
   },
   "Contacts": {

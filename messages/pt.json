@@ -259,7 +259,9 @@
       "downloadFailed": "Não foi possível baixar o anexo",
       "viewImage": "Ver imagem",
       "expandVideo": "Expandir vídeo",
-      "imageAlt": "Imagem compartilhada"
+      "imageAlt": "Imagem compartilhada",
+      "adminBadge": "Admin",
+      "adminBadgeTitle": "Enviado por um administrador — o responsável pelo cliente não mudou"
     },
     "mediaViewer": {
       "counter": "{index} de {total}",
@@ -328,6 +330,40 @@
       "resumed": "IA retomada.",
       "updateError": "Não foi possível atualizar o assistente de IA.",
       "networkError": "Não foi possível conectar ao servidor."
+    },
+    "ownership": {
+      "tabUnassigned": "Sem responsável",
+      "tabMine": "Meus",
+      "tabTeam": "Equipe",
+      "tabAll": "Todos",
+      "agentFilter": "Agente",
+      "allAgents": "Todos os agentes",
+      "unassigned": "Sem responsável",
+      "take": "Atender este cliente",
+      "taking": "Assumindo…",
+      "taken": "Agora você atende este cliente",
+      "claimLost": "{owner} já está atendendo este cliente",
+      "sendLost": "{owner} acabou de assumir este cliente. Sua mensagem não foi enviada — ela continua na caixa de resposta.",
+      "notOwner": "{owner} está atendendo este cliente. Sua mensagem não foi enviada.",
+      "lockedBanner": "🔒 {owner} está atendendo este cliente",
+      "lockedHint": "Você pode ler este chat. Só {owner} ou um administrador podem responder.",
+      "adminReplyHint": "Você está respondendo como administrador — o cliente continua com {owner}.",
+      "adminUnassignedHint": "Você está respondendo como administrador — o cliente continua sem responsável.",
+      "ownerLabel": "Responsável: {owner}",
+      "assign": "Atribuir",
+      "assignTo": "Atribuir a um agente",
+      "transferTo": "Transferir para um agente",
+      "release": "Devolver para Sem responsável",
+      "noAgents": "Ainda não há agentes — convide um em Configurações → Membros",
+      "assignedTo": "Atribuído a {owner}",
+      "released": "Devolvido para Sem responsável",
+      "ownerChangeFailed": "Não foi possível alterar o responsável: {reason}",
+      "takeFailed": "Não foi possível assumir este cliente: {reason}",
+      "anotherAgent": "outro agente",
+      "emptyUnassigned": "Nenhum cliente sem responsável. Bom trabalho!",
+      "emptyMine": "Você ainda não atende nenhum cliente. Assuma um em Sem responsável.",
+      "emptyTeam": "Nenhum cliente está com seus colegas.",
+      "you": "Você"
     }
   },
   "Contacts": {

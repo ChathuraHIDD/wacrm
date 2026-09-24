@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import { useAuth } from "@/hooks/use-auth";
+import { useCan } from "@/hooks/use-can";
 
 // ------------------------------------------------------------
 // Account AI status is the same for every conversation, so cache it per
@@ -79,6 +80,7 @@ export function AiThreadBanner({
   onChange,
 }: AiThreadBannerProps) {
   const t = useTranslations("Inbox.aiBanner");
+  const canOwn = useCan("own-customers");
   const { accountId } = useAuth();
   const [autoReplyOn, setAutoReplyOn] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
@@ -115,11 +117,11 @@ export function AiThreadBanner({
         setPaused(paused);
         onChange?.({
           ai_autoreply_disabled: paused,
-          // Take over assigns to the acting agent; resume releases only
-          // the caller's own assignment. The realtime UPDATE reconciles
-          // the exact value either way.
+          // Take over claims the customer for an agent (Claim & Lock —
+          // admins pause without owning); a successful resume leaves it
+          // Unassigned. The realtime UPDATE reconciles the exact value.
           ...(paused
-            ? currentUserId
+            ? currentUserId && canOwn
               ? { assigned_agent_id: currentUserId }
               : {}
             : { assigned_agent_id: null }),
@@ -131,7 +133,7 @@ export function AiThreadBanner({
         setBusy(false);
       }
     },
-    [conversationId, currentUserId, onChange, t],
+    [conversationId, currentUserId, canOwn, onChange, t],
   );
 
   // Account has no auto-reply → nothing to show. (Still loading → nothing.)

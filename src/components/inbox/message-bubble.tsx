@@ -10,6 +10,7 @@ import {
   MapPin,
   LayoutTemplate,
   CornerDownLeft,
+  ShieldCheck,
   Sparkles,
 } from "lucide-react";
 import { format } from "date-fns";
@@ -292,6 +293,15 @@ export function MessageBubble({
               (always outbound, so it sits on the primary fill). Lets
               agents tell an AI reply from their own / a Flow's at a
               glance. */}
+          {message.sent_as_admin && (
+            <span
+              className="inline-flex items-center gap-0.5 rounded-full bg-primary-foreground/20 px-1.5 py-px text-[9px] font-semibold uppercase leading-none tracking-wide text-primary-foreground"
+              title={t("adminBadgeTitle")}
+            >
+              <ShieldCheck className="h-2.5 w-2.5" />
+              {t("adminBadge")}
+            </span>
+          )}
           {message.ai_generated && (
             <span
               className="inline-flex items-center gap-0.5 rounded-full bg-primary-foreground/20 px-1.5 py-px text-[9px] font-semibold uppercase leading-none tracking-wide text-primary-foreground"

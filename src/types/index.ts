@@ -270,6 +270,12 @@ export interface Message {
    */
   ai_generated?: boolean;
   /**
+   * True when an owner/admin sent this reply (Claim & Lock, migration
+   * 043). Admins never own customers, so their replies never change the
+   * owner; the inbox labels them "Admin".
+   */
+  sent_as_admin?: boolean;
+  /**
    * Meta's reason for a failed send, from the `failed` status webhook's
    * `errors[0]` (code / title / error_data.details). Only set when
    * `status === 'failed'`; never cleared by a later status. Migration 042.

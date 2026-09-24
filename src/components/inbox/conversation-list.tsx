@@ -7,9 +7,18 @@ import {
   matchesContactFilters,
   normalizeConversations,
 } from "@/lib/inbox/conversations";
+import {
+  countByOwnershipTab,
+  defaultOwnershipTab,
+  matchesOwnershipTab,
+  ownershipTabsFor,
+  type OwnershipTab,
+} from "@/lib/inbox/ownership-tabs";
+import { useAuth } from "@/hooks/use-auth";
+import { useCan } from "@/hooks/use-can";
 import { cn } from "@/lib/utils";
-import type { Conversation, ConversationStatus, Tag } from "@/types";
-import { Search, ChevronDown, X } from "lucide-react";
+import type { Conversation, ConversationStatus, Profile, Tag } from "@/types";
+import { Search, ChevronDown, Lock, X } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { useTranslations } from "next-intl";
 import { Input } from "@/components/ui/input";
@@ -46,6 +55,22 @@ const STATUS_COLORS: Record<ConversationStatus, string> = {
 
 type InboxFilter = ConversationStatus | "all" | "unread";
 
+type Member = Pick<Profile, "id" | "user_id" | "full_name" | "email" | "account_role">;
+
+const OWNERSHIP_TAB_LABEL: Record<OwnershipTab, string> = {
+  unassigned: "tabUnassigned",
+  mine: "tabMine",
+  team: "tabTeam",
+  all: "tabAll",
+};
+
+const OWNERSHIP_TAB_EMPTY: Record<OwnershipTab, string | null> = {
+  unassigned: "emptyUnassigned",
+  mine: "emptyMine",
+  team: "emptyTeam",
+  all: null,
+};
+
 export function ConversationList({
   activeConversationId,
   onSelect,
@@ -54,6 +79,22 @@ export function ConversationList({
   resyncToken = 0,
 }: ConversationListProps) {
   const t = useTranslations("Inbox.conversationList");
+  const tOwn = useTranslations("Inbox.ownership");
+  const { user, accountRole } = useAuth();
+  const canSupervise = useCan("supervise-customers");
+  const userId = user?.id ?? null;
+
+  // Claim & Lock tabs. `null` = "not chosen yet" → the role's default,
+  // so the right tab shows once the profile loads without an effect.
+  const [chosenTab, setChosenTab] = useState<OwnershipTab | null>(null);
+  const ownershipTabs = ownershipTabsFor(accountRole);
+  const ownershipTab =
+    chosenTab && ownershipTabs.includes(chosenTab)
+      ? chosenTab
+      : defaultOwnershipTab(accountRole);
+  // Admins' "filter by agent" (user id), applied on top of the tab.
+  const [agentFilter, setAgentFilter] = useState<string | null>(null);
+  const [members, setMembers] = useState<Member[]>([]);
   
   const FILTER_OPTIONS: { label: string; value: InboxFilter }[] = useMemo(() => [
     { label: t("filterAll"), value: "all" },
@@ -140,6 +181,37 @@ export function ConversationList({
     };
   }, []);
 
+  // Account members, for owner badges and the admin agent filter.
+  useEffect(() => {
+    const supabase = createClient();
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase
+        .from("profiles")
+        .select("id, user_id, full_name, email, account_role")
+        .order("full_name");
+      if (!cancelled && data) setMembers(data as Member[]);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const memberNames = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const p of members) m.set(p.user_id, p.full_name?.trim() || p.email);
+    return m;
+  }, [members]);
+  const agents = useMemo(
+    () => members.filter((p) => p.account_role === "agent"),
+    [members],
+  );
+  const effectiveAgentFilter = canSupervise ? agentFilter : null;
+  const tabCounts = useMemo(
+    () => countByOwnershipTab(conversations, userId, effectiveAgentFilter),
+    [conversations, userId, effectiveAgentFilter],
+  );
+
   // Company options are derived from the loaded conversations — there's no
   // separate companies table, and only companies with a live conversation
   // are worth offering as an inbox filter.
@@ -159,7 +231,9 @@ export function ConversationList({
   }, [tags]);
 
   const filtered = useMemo(() => {
-    let result = conversations;
+    let result = conversations.filter((c) =>
+      matchesOwnershipTab(c, ownershipTab, userId, effectiveAgentFilter),
+    );
 
     if (filter === "unread") {
       result = result.filter((c) => c.unread_count > 0);
@@ -188,7 +262,16 @@ export function ConversationList({
     }
 
     return result;
-  }, [conversations, filter, search, selectedTagIds, selectedCompany]);
+  }, [
+    conversations,
+    ownershipTab,
+    userId,
+    effectiveAgentFilter,
+    filter,
+    search,
+    selectedTagIds,
+    selectedCompany,
+  ]);
 
   const toggleTag = useCallback((id: string) => {
     setSelectedTagIds((prev) =>
@@ -219,6 +302,15 @@ export function ConversationList({
 
   const activeFilter = FILTER_OPTIONS.find((o) => o.value === filter);
 
+  // Owner badge on a row: a teammate's name (read-only for agents),
+  // nothing on my own customers, "Unassigned" on the All tab.
+  const ownerBadgeLabel = (conv: Conversation): string | null => {
+    const owner = conv.assigned_agent_id ?? null;
+    if (!owner) return ownershipTab === "all" ? tOwn("unassigned") : null;
+    if (owner === userId) return null;
+    return memberNames.get(owner) ?? tOwn("anotherAgent");
+  };
+
   return (
     // w-full on mobile so the list occupies the whole viewport when it's
     // the single pane showing; fixed 320px on desktop where it shares the
@@ -226,6 +318,15 @@ export function ConversationList({
     <div className="flex h-full w-full flex-col border-r border-border bg-card lg:w-80">
       {/* Search + Filter */}
       <div className="space-y-2 border-b border-border p-3">
+        {/* Claim & Lock tabs — Unassigned / Mine / Team (All for admins). */}
+        <OwnershipTabBar
+          tabs={ownershipTabs}
+          active={ownershipTab}
+          counts={tabCounts}
+          label={(tab) => tOwn(OWNERSHIP_TAB_LABEL[tab])}
+          onChange={setChosenTab}
+        />
+
         <div className="relative">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -237,6 +338,44 @@ export function ConversationList({
         </div>
 
         <div className="flex flex-wrap items-center gap-1">
+          {canSupervise && agents.length > 0 && ownershipTab !== "unassigned" && (
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                className={cn(
+                  "inline-flex max-w-40 items-center justify-center h-7 gap-1 px-2 text-xs rounded-md hover:bg-muted",
+                  agentFilter ? "text-primary" : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <span className="truncate">
+                  {agentFilter
+                    ? (memberNames.get(agentFilter) ?? tOwn("agentFilter"))
+                    : tOwn("allAgents")}
+                </span>
+                <ChevronDown className="h-3 w-3 shrink-0" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="max-h-64 w-56 border-border bg-popover">
+                <DropdownMenuItem
+                  onClick={() => setAgentFilter(null)}
+                  className={cn("text-sm", agentFilter === null ? "text-primary" : "text-popover-foreground")}
+                >
+                  {tOwn("allAgents")}
+                </DropdownMenuItem>
+                {agents.map((a) => (
+                  <DropdownMenuItem
+                    key={a.id}
+                    onClick={() => setAgentFilter(a.user_id)}
+                    className={cn(
+                      "text-sm",
+                      agentFilter === a.user_id ? "text-primary" : "text-popover-foreground",
+                    )}
+                  >
+                    <span className="truncate">{a.full_name?.trim() || a.email}</span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+
           <DropdownMenu>
             <DropdownMenuTrigger className="inline-flex items-center justify-center h-7 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground rounded-md hover:bg-muted">
                 {activeFilter?.label ?? t("filterAll")}
@@ -403,7 +542,14 @@ export function ConversationList({
           </div>
         ) : filtered.length === 0 ? (
           <div className="px-4 py-12 text-center">
-            <p className="text-sm text-muted-foreground">{t("noConversations")}</p>
+            <p className="text-sm text-muted-foreground">
+              {OWNERSHIP_TAB_EMPTY[ownershipTab] &&
+              !search.trim() &&
+              filter === "all" &&
+              !hasContactFilters
+                ? tOwn(OWNERSHIP_TAB_EMPTY[ownershipTab])
+                : t("noConversations")}
+            </p>
           </div>
         ) : (
           <div className="flex flex-col">
@@ -413,6 +559,7 @@ export function ConversationList({
                 conversation={conv}
                 isActive={conv.id === activeConversationId}
                 onSelect={handleSelect}
+                ownerLabel={ownerBadgeLabel(conv)}
                 t={t}
               />
             ))}
@@ -423,10 +570,55 @@ export function ConversationList({
   );
 }
 
+interface OwnershipTabBarProps {
+  tabs: OwnershipTab[];
+  active: OwnershipTab;
+  counts: Record<OwnershipTab, number>;
+  label: (tab: OwnershipTab) => string;
+  onChange: (tab: OwnershipTab) => void;
+}
+
+function OwnershipTabBar({ tabs, active, counts, label, onChange }: OwnershipTabBarProps) {
+  return (
+    <div role="tablist" className="flex gap-1 rounded-lg bg-muted p-0.5">
+      {tabs.map((tab) => (
+        <button
+          key={tab}
+          type="button"
+          role="tab"
+          aria-selected={active === tab}
+          onClick={() => onChange(tab)}
+          className={cn(
+            "flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors",
+            active === tab
+              ? "bg-card text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {label(tab)}
+          <span
+            className={cn(
+              "min-w-4 rounded-full px-1 text-[10px]",
+              // Unassigned customers are waiting on someone — make them pop.
+              tab === "unassigned" && counts.unassigned > 0
+                ? "bg-amber-500/20 text-amber-600 dark:text-amber-300"
+                : "text-muted-foreground",
+            )}
+          >
+            {counts[tab]}
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 interface ConversationItemProps {
   conversation: Conversation;
   isActive: boolean;
   onSelect: (conversation: Conversation) => void;
+  /** Owner badge text (Claim & Lock), or null for none. */
+  ownerLabel: string | null;
   t: ReturnType<typeof useTranslations>;
 }
 
@@ -434,6 +626,7 @@ function ConversationItem({
   conversation,
   isActive,
   onSelect,
+  ownerLabel,
   t,
 }: ConversationItemProps) {
   const contact = conversation.contact;
@@ -484,6 +677,17 @@ function ConversationItem({
             {conversation.last_message_text || t("noMessagesYet")}
           </p>
           <div className="flex shrink-0 items-center gap-1.5">
+            {ownerLabel && (
+              <span
+                className="inline-flex max-w-24 items-center gap-0.5 truncate rounded-full bg-muted px-1.5 py-px text-[10px] text-muted-foreground"
+                title={ownerLabel}
+              >
+                {conversation.assigned_agent_id ? (
+                  <Lock className="h-2.5 w-2.5 shrink-0" />
+                ) : null}
+                <span className="truncate">{ownerLabel}</span>
+              </span>
+            )}
             {conversation.unread_count > 0 && (
               <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground">
                 {conversation.unread_count}

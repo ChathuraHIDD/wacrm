@@ -3,9 +3,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useAuth } from "@/hooks/use-auth";
-import { usePresence } from "@/hooks/use-presence";
-import { PresenceDot } from "@/components/presence/presence-dot";
-import { presenceLabel } from "@/lib/presence";
 import { cn } from "@/lib/utils";
 import type {
   Conversation,
@@ -20,8 +17,6 @@ import type {
 import {
   MessageSquare,
   ChevronDown,
-  UserPlus,
-  Check,
   Clock,
   ArrowLeft,
   RefreshCw,
@@ -35,7 +30,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -46,8 +40,11 @@ import { collectMediaGallery } from "@/lib/media/gallery";
 import {
   MessageComposer,
   CHAT_MEDIA_BUCKET,
+  type ComposerSendOutcome,
   type SendMediaPayload,
 } from "./message-composer";
+import { OwnershipBanner, OwnershipControl, memberName } from "./ownership-controls";
+import { useCan } from "@/hooks/use-can";
 import { deleteAccountMedia } from "@/lib/storage/upload-media";
 import { TemplatePicker } from "./template-picker";
 import { AiThreadBanner } from "./ai-thread-banner";
@@ -69,6 +66,8 @@ interface MessageThreadProps {
   onMessagesLoaded: (messages: Message[]) => void;
   onNewMessage: (message: Message) => void;
   onUpdateMessage: (id: string, updates: Partial<Message>) => void;
+  /** Drop an optimistic bubble whose send was refused (never sent). */
+  onRemoveMessage: (id: string) => void;
   onStatusChange: (conversationId: string, status: ConversationStatus) => void;
   onAssignChange: (
     conversationId: string,
@@ -132,6 +131,23 @@ function groupMessagesByDate(messages: Message[]) {
   return groups;
 }
 
+/** Error body of /api/whatsapp/send (and the claim/owner routes). */
+interface SendErrorPayload {
+  error?: string;
+  code?: string;
+  owner_id?: string | null;
+  owner_name?: string | null;
+}
+
+/**
+ * Claim & Lock refused the send: `claimed_by_other` (a teammate won the
+ * race to this Unassigned customer) or `not_owner` (a teammate already
+ * owned it). Nothing reached WhatsApp.
+ */
+function isOwnershipRefusal(payload: SendErrorPayload): boolean {
+  return payload.code === "claimed_by_other" || payload.code === "not_owner";
+}
+
 const STATUS_OPTIONS: { label: string; value: ConversationStatus; color: string }[] = [
   { label: "Open", value: "open", color: "text-primary" },
   { label: "Pending", value: "pending", color: "text-amber-400" },
@@ -157,6 +173,7 @@ export function MessageThread({
   onMessagesLoaded,
   onNewMessage,
   onUpdateMessage,
+  onRemoveMessage,
   onStatusChange,
   onAssignChange,
   onBack,
@@ -170,7 +187,13 @@ export function MessageThread({
   const tQuote = useTranslations("Inbox.replyQuote");
 
   const { user } = useAuth();
-  const { getPresence, getRow, now } = usePresence();
+  const tOwn = useTranslations("Inbox.ownership");
+  const canSupervise = useCan("supervise-customers");
+  const [ownershipBusy, setOwnershipBusy] = useState(false);
+  // Claim & Lock: the conversation's assignee is derived from the
+  // contact's owner (migration 043) and kept live by realtime.
+  const ownerId = conversation?.assigned_agent_id ?? null;
+  const lockedForMe = Boolean(ownerId) && ownerId !== user?.id && !canSupervise;
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
@@ -445,7 +468,9 @@ export function MessageThread({
   // Guarding on hasUnread prevents the eq-update loop: once unread_count
   // is 0 the condition is false, so no further UPDATE is issued.
   useEffect(() => {
-    if (!conversationId || !hasUnread) return;
+    // A teammate's customer is read-only: opening it must not clear the
+    // owner's unread badge (RLS would refuse the write anyway).
+    if (!conversationId || !hasUnread || lockedForMe) return;
     const supabase = createClient();
     supabase
       .from("conversations")
@@ -454,7 +479,7 @@ export function MessageThread({
       .then(({ error }) => {
         if (error) console.error("Failed to reset unread_count:", error);
       });
-  }, [conversationId, hasUnread]);
+  }, [conversationId, hasUnread, lockedForMe]);
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
@@ -464,9 +489,28 @@ export function MessageThread({
     }
   }, [messages]);
 
+  /**
+   * Claim & Lock refused a send. Drop the optimistic bubble (nothing was
+   * sent) and say who has the customer.
+   */
+  const handleOwnershipRefusal = useCallback(
+    (tempId: string, payload: SendErrorPayload, draftKept: boolean) => {
+      onRemoveMessage(tempId);
+      const owner = payload.owner_name?.trim() || tOwn("anotherAgent");
+      if (payload.code === "claimed_by_other" && draftKept) {
+        toast.error(tOwn("sendLost", { owner }));
+      } else if (payload.code === "claimed_by_other") {
+        toast.error(tOwn("claimLost", { owner }));
+      } else {
+        toast.error(tOwn("notOwner", { owner }));
+      }
+    },
+    [onRemoveMessage, tOwn],
+  );
+
   const handleSend = useCallback(
-    async (text: string, replyToId?: string) => {
-      if (!conversation) return;
+    async (text: string, replyToId?: string): Promise<ComposerSendOutcome> => {
+      if (!conversation) return {};
 
       const tempId = `temp-${Date.now()}`;
 
@@ -496,29 +540,37 @@ export function MessageThread({
           }),
         });
 
-        const payload = await res.json().catch(() => ({}));
+        const payload: SendErrorPayload = await res.json().catch(() => ({}));
 
         if (!res.ok) {
+          if (isOwnershipRefusal(payload)) {
+            // Lost the race (or never had the customer): nothing was sent,
+            // and the typed text goes back into the box.
+            handleOwnershipRefusal(tempId, payload, true);
+            return { restoreDraft: true };
+          }
           const reason = payload?.error || `HTTP ${res.status}`;
           console.error("Failed to send message:", reason);
           toast.error(t("sendFailed", { reason }));
           // Mark the optimistic bubble as failed so the user sees what happened
           onUpdateMessage(tempId, { status: "failed" });
-          return;
+          return {};
         }
 
         // Success — the realtime INSERT event will replace the temp bubble
         // with the real DB row. If realtime hasn't arrived yet, at least
         // flip status to 'sent' so the UI stops showing "sending".
         onUpdateMessage(tempId, { status: "sent" });
+        return {};
       } catch (err) {
         console.error("Failed to send message:", err);
         const reason = err instanceof Error ? err.message : "network error";
         toast.error(t("sendFailed", { reason }));
         onUpdateMessage(tempId, { status: "failed" });
+        return {};
       }
     },
-    [conversation, onNewMessage, onUpdateMessage, t]
+    [conversation, onNewMessage, onUpdateMessage, handleOwnershipRefusal, t]
   );
 
   const handleSendMedia = useCallback(
@@ -562,8 +614,13 @@ export function MessageThread({
           }),
         });
 
-        const data = await res.json().catch(() => ({}));
+        const data: SendErrorPayload = await res.json().catch(() => ({}));
 
+        if (!res.ok && isOwnershipRefusal(data)) {
+          handleOwnershipRefusal(tempId, data, false);
+          void deleteAccountMedia(CHAT_MEDIA_BUCKET, payload.path).catch(() => {});
+          return;
+        }
         if (!res.ok) {
           const reason = data?.error || `HTTP ${res.status}`;
           console.error("Failed to send media:", reason);
@@ -584,7 +641,7 @@ export function MessageThread({
         void deleteAccountMedia(CHAT_MEDIA_BUCKET, payload.path).catch(() => {});
       }
     },
-    [conversation, onNewMessage, onUpdateMessage, t],
+    [conversation, onNewMessage, onUpdateMessage, handleOwnershipRefusal, t],
   );
 
   const handleSendInteractive = useCallback(
@@ -619,8 +676,12 @@ export function MessageThread({
           }),
         });
 
-        const data = await res.json().catch(() => ({}));
+        const data: SendErrorPayload = await res.json().catch(() => ({}));
 
+        if (!res.ok && isOwnershipRefusal(data)) {
+          handleOwnershipRefusal(tempId, data, false);
+          return;
+        }
         if (!res.ok) {
           const reason = data?.error || `HTTP ${res.status}`;
           console.error("Failed to send interactive message:", reason);
@@ -637,7 +698,7 @@ export function MessageThread({
         onUpdateMessage(tempId, { status: "failed" });
       }
     },
-    [conversation, onNewMessage, onUpdateMessage, t],
+    [conversation, onNewMessage, onUpdateMessage, handleOwnershipRefusal, t],
   );
 
   const handleStatusChange = useCallback(
@@ -708,8 +769,12 @@ export function MessageThread({
           }),
         });
 
-        const payload = await res.json().catch(() => ({}));
+        const payload: SendErrorPayload = await res.json().catch(() => ({}));
 
+        if (!res.ok && isOwnershipRefusal(payload)) {
+          handleOwnershipRefusal(tempId, payload, false);
+          return;
+        }
         if (!res.ok) {
           const reason = payload?.error || `HTTP ${res.status}`;
           console.error("Failed to send template:", reason);
@@ -726,7 +791,7 @@ export function MessageThread({
         onUpdateMessage(tempId, { status: "failed" });
       }
     },
-    [conversation, onNewMessage, onUpdateMessage, t],
+    [conversation, onNewMessage, onUpdateMessage, handleOwnershipRefusal, t],
   );
 
   // Build a quick id → Message map so reply quotes can be rendered without
@@ -841,25 +906,67 @@ export function MessageThread({
     [conversation, user?.id, t],
   );
 
-  const handleAssignChange = useCallback(
-    async (agentId: string | null) => {
-      if (!conversation) return;
-
-      const supabase = createClient();
-      const { error } = await supabase
-        .from("conversations")
-        .update({ assigned_agent_id: agentId })
-        .eq("id", conversation.id);
-
-      if (error) {
-        console.error("Failed to update assignment:", error);
-        toast.error(t("assignmentUpdateFailed"));
-        return;
+  // "Take this customer" — atomic claim; a lost race names the winner.
+  const handleTake = useCallback(async () => {
+    if (!conversation) return;
+    setOwnershipBusy(true);
+    try {
+      const res = await fetch(`/api/contacts/${conversation.contact_id}/claim`, {
+        method: "POST",
+      });
+      const data: SendErrorPayload & { claimed?: boolean } = await res
+        .json()
+        .catch(() => ({}));
+      if (res.ok && data.claimed) {
+        toast.success(tOwn("taken"));
+        onAssignChange(conversation.id, data.owner_id ?? user?.id ?? null);
+      } else if (res.status === 409) {
+        const owner = data.owner_name?.trim() || tOwn("anotherAgent");
+        toast.error(tOwn("claimLost", { owner }));
+        onAssignChange(conversation.id, data.owner_id ?? null);
+      } else {
+        toast.error(tOwn("takeFailed", { reason: data.error ?? `HTTP ${res.status}` }));
       }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : "network error";
+      toast.error(tOwn("takeFailed", { reason }));
+    } finally {
+      setOwnershipBusy(false);
+    }
+  }, [conversation, onAssignChange, tOwn, user?.id]);
 
-      onAssignChange(conversation.id, agentId);
+  // Admin assign / transfer (agent id) or release (null).
+  const handleSetOwner = useCallback(
+    async (newOwnerId: string | null) => {
+      if (!conversation) return;
+      setOwnershipBusy(true);
+      try {
+        const res = await fetch(`/api/contacts/${conversation.contact_id}/owner`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ owner_id: newOwnerId }),
+        });
+        const data: SendErrorPayload = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          toast.error(
+            tOwn("ownerChangeFailed", { reason: data.error ?? `HTTP ${res.status}` }),
+          );
+          return;
+        }
+        toast.success(
+          data.owner_id
+            ? tOwn("assignedTo", { owner: data.owner_name ?? tOwn("anotherAgent") })
+            : tOwn("released"),
+        );
+        onAssignChange(conversation.id, data.owner_id ?? null);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : "network error";
+        toast.error(tOwn("ownerChangeFailed", { reason }));
+      } finally {
+        setOwnershipBusy(false);
+      }
     },
-    [conversation, onAssignChange, t],
+    [conversation, onAssignChange, tOwn],
   );
 
   // Empty state — same WhatsApp-style doodle background as the active
@@ -886,11 +993,12 @@ export function MessageThread({
   const currentStatus = STATUS_OPTIONS.find(
     (s) => s.value === conversation.status
   );
-  const assignedAgentId = conversation.assigned_agent_id ?? null;
-  const currentAssignee = profiles.find((p) => p.user_id === assignedAgentId);
-  const assignLabel = assignedAgentId
-    ? (currentAssignee?.full_name ?? t("assigned"))
-    : t("assign");
+  const assignedAgentId = ownerId;
+  const lockedMessage = lockedForMe
+    ? tOwn("lockedBanner", {
+        owner: memberName(profiles, ownerId) ?? tOwn("anotherAgent"),
+      })
+    : null;
 
   return (
     // `min-w-0` is load-bearing: the page already puts min-w-0 on the
@@ -993,8 +1101,10 @@ export function MessageThread({
 
           {/* Status dropdown */}
           <DropdownMenu>
-            <DropdownMenuTrigger className={cn(
-                  "inline-flex items-center justify-center h-7 gap-1 px-2 text-xs rounded-md hover:bg-muted",
+            <DropdownMenuTrigger
+                disabled={lockedForMe}
+                className={cn(
+                  "inline-flex items-center justify-center h-7 gap-1 px-2 text-xs rounded-md hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60",
                   currentStatus?.color ?? "text-muted-foreground"
                 )}>
                 {currentStatus ? t(`status${currentStatus.label}`) : t("status")}
@@ -1016,70 +1126,16 @@ export function MessageThread({
             </DropdownMenuContent>
           </DropdownMenu>
 
-          {/* Assign dropdown */}
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              className={cn(
-                "inline-flex items-center justify-center h-7 gap-1 px-2 text-xs rounded-md hover:bg-muted",
-                assignedAgentId ? "text-primary" : "text-muted-foreground"
-              )}
-            >
-              <UserPlus className="h-3 w-3" />
-              <span className="hidden sm:inline">{assignLabel}</span>
-              <ChevronDown className="h-3 w-3" />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent
-              align="end"
-              className="border-border bg-popover"
-            >
-              {profiles.length === 0 ? (
-                <DropdownMenuItem disabled className="text-sm text-muted-foreground">
-                  {t("noTeammates")}
-                </DropdownMenuItem>
-              ) : (
-                profiles.map((p) => {
-                  const isSelected = p.user_id === assignedAgentId;
-                  const presence = getPresence(p.user_id);
-                  return (
-                    <DropdownMenuItem
-                      key={p.id}
-                      onClick={() => handleAssignChange(p.user_id)}
-                      className={cn(
-                        "text-sm",
-                        isSelected ? "text-primary" : "text-popover-foreground"
-                      )}
-                    >
-                      <PresenceDot
-                        status={presence}
-                        label={presenceLabel(
-                          presence,
-                          getRow(p.user_id)?.last_seen_at ?? null,
-                          now
-                        )}
-                        className="mr-2"
-                      />
-                      <span className="flex-1">
-                        {p.full_name}
-                        {p.user_id === user?.id ? t("me") : ""}
-                      </span>
-                      {isSelected && <Check className="ml-2 h-3 w-3" />}
-                    </DropdownMenuItem>
-                  );
-                })
-              )}
-              {assignedAgentId && (
-                <>
-                  <DropdownMenuSeparator className="bg-border" />
-                  <DropdownMenuItem
-                    onClick={() => handleAssignChange(null)}
-                    className="text-sm text-muted-foreground"
-                  >
-                    {t("unassign")}
-                  </DropdownMenuItem>
-                </>
-              )}
-            </DropdownMenuContent>
-          </DropdownMenu>
+          {/* Claim & Lock: Take (agents) / Assign·Transfer·Release (admins) /
+              owner badge. */}
+          <OwnershipControl
+            ownerId={ownerId}
+            members={profiles}
+            currentUserId={user?.id ?? null}
+            busy={ownershipBusy}
+            onTake={handleTake}
+            onSetOwner={handleSetOwner}
+          />
         </div>
       </div>
 
@@ -1176,10 +1232,17 @@ export function MessageThread({
         }}
       />
 
+      <OwnershipBanner
+        ownerId={ownerId}
+        members={profiles}
+        currentUserId={user?.id ?? null}
+      />
+
       {/* Composer */}
       <MessageComposer
         conversationId={conversation.id}
         sessionExpired={sessionInfo.expired}
+        lockedMessage={lockedMessage}
         onSend={handleSend}
         onSendMedia={handleSendMedia}
         onSendInteractive={handleSendInteractive}
