@@ -246,6 +246,15 @@ export function Step2SelectAudience({
       return;
     }
 
+    // Rows without a leading `+` and country code were refused (issue
+    // #586). Say so, or a spreadsheet export that stripped the `+` looks
+    // like a mysteriously smaller audience.
+    if (result.invalid > 0) {
+      toast.warning(
+        t('selectAudience.csvInvalidPhones', { count: result.invalid }),
+      );
+    }
+
     setPickedCsvName(selected.name);
     onUpdate({ ...audience, csvContacts: result.contacts });
   }
@@ -509,11 +518,11 @@ export function Step2SelectAudience({
 
       {/* Audience Summary */}
       <div className="rounded-xl border border-border bg-card/50 p-4">
-        <p className="mb-2 text-sm font-medium text-foreground">Audience Summary</p>
+        <p className="mb-2 text-sm font-medium text-foreground">{t('selectAudience.audienceSummary')}</p>
         {loadingCount ? (
           <div className="flex items-center gap-2">
             <Loader2 className="h-4 w-4 animate-spin text-primary" />
-            <span className="text-xs text-muted-foreground">Calculating…</span>
+            <span className="text-xs text-muted-foreground">{t('selectAudience.calculating')}</span>
           </div>
         ) : estimatedCount !== null ? (
           <div className="flex items-center gap-2">
