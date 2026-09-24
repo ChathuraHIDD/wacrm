@@ -75,6 +75,20 @@ BEGIN
       'messages.error_code/error_title/error_details are missing — migration 042 did not apply';
   END IF;
 
+  -- Claim & Lock (043): ownership column, audit table, the atomic claim.
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'contacts' AND column_name = 'owner_id'
+  ) THEN
+    RAISE EXCEPTION 'contacts.owner_id is missing — migration 043 did not apply';
+  END IF;
+  IF to_regclass('public.contact_ownership_events') IS NULL THEN
+    RAISE EXCEPTION 'public.contact_ownership_events is missing — migration 043 did not apply';
+  END IF;
+  IF to_regprocedure('public.claim_contact(uuid, text)') IS NULL THEN
+    RAISE EXCEPTION 'claim_contact(uuid, text) is missing — migration 043 did not apply';
+  END IF;
+
   RAISE NOTICE 'schema verification passed';
 END
 $$;
