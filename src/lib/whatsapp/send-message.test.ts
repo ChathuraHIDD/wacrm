@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
+import type { SendActor } from '@/lib/ownership/permissions';
 import {
   sendMessageToConversation,
   SendMessageError,
@@ -34,11 +35,14 @@ async function expectSendError(
 }
 
 describe('sendMessageToConversation — param validation (pre-DB)', () => {
-  const base = { conversationId: 'cv-1' };
+  const base = {
+    conversationId: 'cv-1',
+    actor: { userId: 'user-1', role: 'agent', claimVia: 'session' },
+  } satisfies Partial<SendMessageParams>;
 
   it('requires conversation_id and message_type', async () => {
-    await expectSendError({ conversationId: '', messageType: 'text' }, 400);
-    await expectSendError({ conversationId: 'cv-1', messageType: '' }, 400);
+    await expectSendError({ ...base, conversationId: '', messageType: 'text' }, 400);
+    await expectSendError({ ...base, messageType: '' }, 400);
   });
 
   it('rejects an unsupported message_type', async () => {
@@ -164,6 +168,9 @@ describe('SendMessageError', () => {
 
 const sendTemplateMessage = vi.fn(async () => ({ messageId: 'wamid.1' }));
 
+// Owners/admins never claim, so the persistence tests below send as one.
+const ADMIN_ACTOR: SendActor = { userId: 'admin-1', role: 'admin', claimVia: 'session' };
+
 // Stub only the senders — the module also exports INTERACTIVE_LIMITS,
 // which `interactive.ts` needs for the payload validation covered above.
 vi.mock('@/lib/whatsapp/meta-api', async (importOriginal) => ({
@@ -204,10 +211,16 @@ interface CapturedWrites {
  * object serves `.single()` lookups and the bare `select().eq().eq()`
  * the template resolver uses.
  */
+type RpcFake = (
+  fn: string,
+  args: Record<string, unknown>
+) => Promise<{ data: unknown; error: { code?: string; message: string } | null }>;
+
 function sendPathDb(
   templateRows: unknown[],
   captured: CapturedWrites,
-  contact: Record<string, unknown> = { id: 'ct-1', phone: '+15551234567' }
+  contact: Record<string, unknown> = { id: 'ct-1', phone: '+15551234567' },
+  rpc?: RpcFake
 ): SupabaseClient {
   const conversation = {
     id: 'cv-1',
@@ -232,7 +245,10 @@ function sendPathDb(
           if (table === 'conversations') captured.conversation = row;
           return builder;
         },
-        maybeSingle: async () => ({ data: null, error: null }),
+        maybeSingle: async () =>
+          table === 'profiles'
+            ? { data: { full_name: 'Gina Agent', email: 'gina@x.test' }, error: null }
+            : { data: null, error: null },
         single: async () => {
           if (table === 'conversations') {
             return { data: conversation, error: null };
@@ -252,6 +268,7 @@ function sendPathDb(
       };
       return builder;
     },
+    rpc,
   } as unknown as SupabaseClient;
 }
 
@@ -273,6 +290,7 @@ describe('sendMessageToConversation — template persistence (#483)', () => {
       'acct-1',
       {
         conversationId: 'cv-1',
+        actor: ADMIN_ACTOR,
         messageType: 'template',
         templateName: 'order_update',
         templateParams: ['A123', 'Friday'],
@@ -295,6 +313,7 @@ describe('sendMessageToConversation — template persistence (#483)', () => {
     const captured: CapturedWrites = {};
     await sendMessageToConversation(sendPathDb([TEMPLATE_ROW], captured), 'acct-1', {
       conversationId: 'cv-1',
+      actor: ADMIN_ACTOR,
       messageType: 'template',
       templateName: 'order_update',
       templateMessageParams: { body: ['B456', 'Monday'] },
@@ -308,6 +327,7 @@ describe('sendMessageToConversation — template persistence (#483)', () => {
     const captured: CapturedWrites = {};
     await sendMessageToConversation(sendPathDb([TEMPLATE_ROW], captured), 'acct-1', {
       conversationId: 'cv-1',
+      actor: ADMIN_ACTOR,
       messageType: 'template',
       templateName: 'order_update',
       templateParams: ['A123', 'Friday'],
@@ -321,6 +341,7 @@ describe('sendMessageToConversation — template persistence (#483)', () => {
     const captured: CapturedWrites = {};
     await sendMessageToConversation(sendPathDb([TEMPLATE_ROW], captured), 'acct-1', {
       conversationId: 'cv-1',
+      actor: ADMIN_ACTOR,
       messageType: 'template',
       templateName: 'order_update',
       templateParams: ['A123', 'Friday'],
@@ -337,6 +358,7 @@ describe('sendMessageToConversation — template persistence (#483)', () => {
     const captured: CapturedWrites = {};
     await sendMessageToConversation(sendPathDb([], captured), 'acct-1', {
       conversationId: 'cv-1',
+      actor: ADMIN_ACTOR,
       messageType: 'template',
       templateName: 'never_synced',
       templateParams: ['A123'],
@@ -369,7 +391,7 @@ describe('sendMessageToConversation — BSUID recipients (#519)', () => {
     await sendMessageToConversation(
       sendPathDb([], captured, { id: 'ct-1', phone: '', wa_user_id: BSUID }),
       'acct-1',
-      { conversationId: 'cv-1', messageType: 'text', contentText: 'hi' }
+      { conversationId: 'cv-1', messageType: 'text', contentText: 'hi', actor: ADMIN_ACTOR }
     );
 
     expect(vi.mocked(sendTextMessage)).toHaveBeenCalledWith(
@@ -389,7 +411,7 @@ describe('sendMessageToConversation — BSUID recipients (#519)', () => {
         wa_user_id: BSUID,
       }),
       'acct-1',
-      { conversationId: 'cv-1', messageType: 'text', contentText: 'hi' }
+      { conversationId: 'cv-1', messageType: 'text', contentText: 'hi', actor: ADMIN_ACTOR }
     );
 
     // Only the phone path supports the trunk-prefix variant retry, so
@@ -411,7 +433,7 @@ describe('sendMessageToConversation — BSUID recipients (#519)', () => {
         wa_user_id: BSUID,
       }),
       'acct-1',
-      { conversationId: 'cv-1', messageType: 'text', contentText: 'hi' }
+      { conversationId: 'cv-1', messageType: 'text', contentText: 'hi', actor: ADMIN_ACTOR }
     );
 
     expect(vi.mocked(sendTextMessage)).toHaveBeenCalledWith(
@@ -425,7 +447,7 @@ describe('sendMessageToConversation — BSUID recipients (#519)', () => {
       sendMessageToConversation(
         sendPathDb([], captured, { id: 'ct-1', phone: '' }),
         'acct-1',
-        { conversationId: 'cv-1', messageType: 'text', contentText: 'hi' }
+        { conversationId: 'cv-1', messageType: 'text', contentText: 'hi', actor: ADMIN_ACTOR }
       )
     ).rejects.toThrow(/no phone number or WhatsApp user ID/);
   });
@@ -440,8 +462,157 @@ describe('sendMessageToConversation — BSUID recipients (#519)', () => {
           wa_user_id: 'garbage',
         }),
         'acct-1',
-        { conversationId: 'cv-1', messageType: 'text', contentText: 'hi' }
+        { conversationId: 'cv-1', messageType: 'text', contentText: 'hi', actor: ADMIN_ACTOR }
       )
     ).rejects.toThrow(/no phone number or WhatsApp user ID/);
+  });
+});
+
+// ============================================================
+// Claim & Lock (migration 043) — the gate in front of Meta.
+// ============================================================
+
+describe('sendMessageToConversation — Claim & Lock', () => {
+  const AGENT: SendActor = { userId: 'agent-me', role: 'agent', claimVia: 'session' };
+  const OWNED_BY_TEAMMATE = { id: 'ct-1', phone: '+15551234567', owner_id: 'agent-gina' };
+  const UNASSIGNED = { id: 'ct-1', phone: '+15551234567', owner_id: null };
+
+  async function metaText() {
+    const { sendTextMessage } = await import('@/lib/whatsapp/meta-api');
+    vi.mocked(sendTextMessage).mockClear();
+    return vi.mocked(sendTextMessage);
+  }
+
+  function text(actor: SendActor) {
+    return { conversationId: 'cv-1', messageType: 'text', contentText: 'hi', actor };
+  }
+
+  it("rejects a non-owner agent with 403 before anything reaches Meta", async () => {
+    const meta = await metaText();
+    const captured: CapturedWrites = {};
+    const rpc = vi.fn<RpcFake>();
+
+    const err = await sendMessageToConversation(
+      sendPathDb([], captured, OWNED_BY_TEAMMATE, rpc),
+      'acct-1',
+      text(AGENT)
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(SendMessageError);
+    expect(err).toMatchObject({
+      status: 403,
+      code: 'not_owner',
+      message: 'Gina Agent is handling this customer',
+      ownership: { ownerId: 'agent-gina', ownerName: 'Gina Agent' },
+    });
+    expect(meta).not.toHaveBeenCalled();
+    expect(rpc).not.toHaveBeenCalled();
+    expect(captured.message).toBeUndefined();
+  });
+
+  it('claims an Unassigned customer on the first reply, then sends', async () => {
+    const meta = await metaText();
+    const captured: CapturedWrites = {};
+    const rpc = vi.fn<RpcFake>(async () => ({
+      data: [{ claimed: true, owner_id: 'agent-me', owner_name: 'Me' }],
+      error: null,
+    }));
+
+    await sendMessageToConversation(sendPathDb([], captured, UNASSIGNED, rpc), 'acct-1', text(AGENT));
+
+    expect(rpc).toHaveBeenCalledWith('claim_contact', {
+      p_contact_id: 'ct-1',
+      p_source: 'first_reply',
+    });
+    expect(meta).toHaveBeenCalledTimes(1);
+    expect(captured.message?.sent_as_admin).toBe(false);
+  });
+
+  it('refuses the loser of a claim race with 409 and sends nothing', async () => {
+    const meta = await metaText();
+    const captured: CapturedWrites = {};
+    const rpc = vi.fn<RpcFake>(async () => ({
+      data: [{ claimed: false, owner_id: 'agent-hank', owner_name: 'Hank Agent' }],
+      error: null,
+    }));
+
+    const err = await sendMessageToConversation(
+      sendPathDb([], captured, UNASSIGNED, rpc),
+      'acct-1',
+      text(AGENT)
+    ).catch((e: unknown) => e);
+
+    expect(err).toMatchObject({
+      status: 409,
+      code: 'claimed_by_other',
+      ownership: { ownerId: 'agent-hank', ownerName: 'Hank Agent' },
+    });
+    expect(meta).not.toHaveBeenCalled();
+    expect(captured.message).toBeUndefined();
+  });
+
+  it.each(['admin', 'owner'] as const)(
+    "lets an %s reply to a teammate's customer without claiming, labelled Admin",
+    async (role) => {
+      const meta = await metaText();
+      const captured: CapturedWrites = {};
+      const rpc = vi.fn<RpcFake>();
+
+      await sendMessageToConversation(
+        sendPathDb([], captured, OWNED_BY_TEAMMATE, rpc),
+        'acct-1',
+        text({ userId: 'boss', role, claimVia: 'session' })
+      );
+
+      expect(meta).toHaveBeenCalledTimes(1);
+      // No claim RPC ⇒ the owner is untouched.
+      expect(rpc).not.toHaveBeenCalled();
+      expect(captured.message?.sent_as_admin).toBe(true);
+    }
+  );
+
+  it('also never claims when an admin replies to an Unassigned customer', async () => {
+    const captured: CapturedWrites = {};
+    const rpc = vi.fn<RpcFake>();
+    await sendMessageToConversation(
+      sendPathDb([], captured, UNASSIGNED, rpc),
+      'acct-1',
+      text({ userId: 'boss', role: 'admin', claimVia: 'session' })
+    );
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it("claims through claim_contact_as for a public-API key's creator", async () => {
+    const captured: CapturedWrites = {};
+    const rpc = vi.fn<RpcFake>(async () => ({
+      data: [{ claimed: true, owner_id: 'agent-me', owner_name: 'Me' }],
+      error: null,
+    }));
+    await sendMessageToConversation(
+      sendPathDb([], captured, UNASSIGNED, rpc),
+      'acct-1',
+      text({ userId: 'agent-me', role: 'agent', claimVia: 'service' })
+    );
+    expect(rpc).toHaveBeenCalledWith('claim_contact_as', {
+      p_contact_id: 'ct-1',
+      p_actor_id: 'agent-me',
+      p_source: 'api',
+    });
+  });
+
+  it('refuses viewers and keys whose creator left', async () => {
+    const meta = await metaText();
+    for (const actor of [
+      { userId: 'v', role: 'viewer', claimVia: 'session' },
+      { userId: null, role: null, claimVia: 'service' },
+    ] satisfies SendActor[]) {
+      const err = await sendMessageToConversation(
+        sendPathDb([], {}, UNASSIGNED, vi.fn<RpcFake>()),
+        'acct-1',
+        text(actor)
+      ).catch((e: unknown) => e);
+      expect(err).toMatchObject({ status: 403, code: 'forbidden' });
+    }
+    expect(meta).not.toHaveBeenCalled();
   });
 });

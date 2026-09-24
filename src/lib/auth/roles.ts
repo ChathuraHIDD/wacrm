@@ -98,6 +98,24 @@ export function canViewOnly(role: AccountRole): boolean {
   return role === "viewer";
 }
 
+/**
+ * Claim & Lock (migration 043): only agents own customers. Owners and
+ * admins supervise — they read and reply everywhere without ever
+ * becoming a customer's owner.
+ */
+export function canOwnCustomers(role: AccountRole): boolean {
+  return role === "agent";
+}
+
+/**
+ * Owner / admin: assign, transfer or release a customer, and reply to
+ * any customer regardless of who owns it (the reply is labelled
+ * "Admin" and never changes ownership).
+ */
+export function canSuperviseCustomers(role: AccountRole): boolean {
+  return hasMinRole(role, "admin");
+}
+
 /** Owner only: irreversible destructive operations. */
 export function canDeleteAccount(role: AccountRole): boolean {
   return role === "owner";

@@ -40,6 +40,7 @@ import {
   SendMessageError,
 } from '@/lib/whatsapp/send-message';
 import type { InteractiveMessagePayload } from '@/lib/whatsapp/interactive';
+import { actorForApiKey } from '@/lib/ownership/claim';
 
 export async function POST(request: Request) {
   try {
@@ -124,6 +125,11 @@ export async function POST(request: Request) {
           typeof body.reply_to_message_id === 'string'
             ? body.reply_to_message_id
             : null,
+        // Claim & Lock: the key acts for the member who created it.
+        actor: await actorForApiKey(ctx.supabase, {
+          accountId: ctx.accountId,
+          createdBy: ctx.createdBy,
+        }),
       }
     );
 

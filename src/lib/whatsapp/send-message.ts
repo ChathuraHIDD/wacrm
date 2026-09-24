@@ -42,6 +42,8 @@ import {
 } from '@/lib/whatsapp/phone-utils';
 import { resolveContactSendTarget } from '@/lib/whatsapp/wa-identity';
 import type { MessageTemplate } from '@/types';
+import { claimContact, OwnershipError } from '@/lib/ownership/claim';
+import { decideSend, type SendActor } from '@/lib/ownership/permissions';
 import {
   resolveTemplateRow,
   templateBodyParams,
@@ -61,14 +63,28 @@ export const VALID_MESSAGE_TYPES = [
  * Callers map it to their own response shape (`toErrorResponse` for
  * the dashboard route, the v1 envelope for the public endpoint).
  */
+/** Who owns the customer, attached to a Claim & Lock refusal. */
+export interface SendOwnershipDetails {
+  ownerId: string | null;
+  ownerName: string | null;
+}
+
 export class SendMessageError extends Error {
   readonly code: string;
   readonly status: number;
-  constructor(code: string, message: string, status: number) {
+  /** Set on `not_owner` / `claimed_by_other` so the UI can name the owner. */
+  readonly ownership?: SendOwnershipDetails;
+  constructor(
+    code: string,
+    message: string,
+    status: number,
+    ownership?: SendOwnershipDetails
+  ) {
     super(message);
     this.name = 'SendMessageError';
     this.code = code;
     this.status = status;
+    this.ownership = ownership;
   }
 }
 
@@ -94,6 +110,13 @@ export interface SendMessageParams {
    * automations, the AI bot.
    */
   senderId?: string | null;
+  /**
+   * Who is sending, for Claim & Lock (migration 043). Owners/admins may
+   * reply to anyone (labelled "Admin", never claims). An agent may reply
+   * to a customer they own; replying to an Unassigned one claims it
+   * first, atomically. Anything else is refused before Meta is called.
+   */
+  actor: SendActor;
 }
 
 export interface SendMessageResult {
@@ -208,6 +231,7 @@ export async function sendMessageToConversation(
     interactivePayload,
     replyToMessageId,
     senderId,
+    actor,
   } = params;
 
   if (!conversationId) {
@@ -241,6 +265,10 @@ export async function sendMessageToConversation(
   }
 
   const contact = conversation.contact;
+
+  // Claim & Lock gate — before any other lookup and, above all, before
+  // Meta: a refused send must never reach the customer.
+  const { asAdmin } = await authorizeSend(db, actor, contact);
 
   // A contact is addressable by phone number OR by business-scoped user
   // ID. Meta withholds the phone number for a customer who has adopted
@@ -487,6 +515,7 @@ export async function sendMessageToConversation(
       conversation_id: conversationId,
       sender_type: 'agent',
       sender_id: senderId ?? null,
+      sent_as_admin: asAdmin,
       content_type: messageType,
       content_text: persistedText,
       media_url: mediaUrl || null,
@@ -547,4 +576,79 @@ export async function sendMessageToConversation(
   }
 
   return { messageId: messageRecord.id, whatsappMessageId: waMessageId };
+}
+
+function ownerLabel(name: string | null): string {
+  return name?.trim() || 'Another agent';
+}
+
+/**
+ * Enforce Claim & Lock for one send. Returns whether the message is an
+ * admin reply (labelled "Admin"). Claims the customer when an agent
+ * replies to an Unassigned one; throws `SendMessageError` —
+ * 403 `not_owner` / `forbidden`, 409 `claimed_by_other` — otherwise.
+ */
+async function authorizeSend(
+  db: SupabaseClient,
+  actor: SendActor,
+  contact: { id: string; owner_id?: string | null }
+): Promise<{ asAdmin: boolean }> {
+  const ownerId = contact.owner_id ?? null;
+  const decision = decideSend(actor, ownerId);
+
+  if (decision.kind === 'allow') return { asAdmin: decision.asAdmin };
+
+  if (decision.kind === 'deny') {
+    if (decision.reason === 'insufficient_role') {
+      throw new SendMessageError(
+        'forbidden',
+        'Your role cannot send messages',
+        403
+      );
+    }
+    const ownerName = await lookupOwnerName(db, decision.ownerId);
+    throw new SendMessageError(
+      'not_owner',
+      `${ownerLabel(ownerName)} is handling this customer`,
+      403,
+      { ownerId: decision.ownerId, ownerName }
+    );
+  }
+
+  let claim;
+  try {
+    claim = await claimContact(db, {
+      contactId: contact.id,
+      actor,
+      source: actor.claimVia === 'session' ? 'first_reply' : 'api',
+    });
+  } catch (err) {
+    if (err instanceof OwnershipError) {
+      throw new SendMessageError('forbidden', err.message, err.status);
+    }
+    throw err;
+  }
+  if (!claim.claimed) {
+    // Lost the race: someone else took this customer a moment ago.
+    throw new SendMessageError(
+      'claimed_by_other',
+      `${ownerLabel(claim.ownerName)} just took this customer. Your message was not sent.`,
+      409,
+      { ownerId: claim.ownerId, ownerName: claim.ownerName }
+    );
+  }
+  return { asAdmin: false };
+}
+
+async function lookupOwnerName(
+  db: SupabaseClient,
+  ownerId: string | null
+): Promise<string | null> {
+  if (!ownerId) return null;
+  const { data } = await db
+    .from('profiles')
+    .select('full_name, email')
+    .eq('user_id', ownerId)
+    .maybeSingle();
+  return data?.full_name?.trim() || data?.email || null;
 }

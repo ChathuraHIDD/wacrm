@@ -123,6 +123,12 @@ function makeSupabaseMock() {
       })),
     },
     from: vi.fn((table: string) => builder(table)),
+    // Claim & Lock: an agent's first reply to an Unassigned customer
+    // claims it (the caller wins here).
+    rpc: vi.fn(async () => ({
+      data: [{ claimed: true, owner_id: 'user-1', owner_name: 'Me' }],
+      error: null,
+    })),
   }
 }
 
@@ -312,5 +318,9 @@ describe('POST /api/whatsapp/send — role enforcement', () => {
 
     expect(res.status).toBe(200)
     expect(sendTemplateMessage).toHaveBeenCalledTimes(1)
+    expect(supabaseMock.rpc).toHaveBeenCalledWith('claim_contact', {
+      p_contact_id: 'contact-1',
+      p_source: 'first_reply',
+    })
   })
 })
