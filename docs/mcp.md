@@ -48,6 +48,13 @@ data or send messages, add `"WACRM_ENABLE_WRITES": "true"` (and
 - **Broadcasts (opt-in):** launch a template broadcast — requires an
   explicit `confirm` and is marked destructive.
 
+Sends and broadcasts follow [Claim & Lock](./claim-and-lock.md): the
+MCP server calls the public API with your key, and the key acts for the
+member who created it. With an agent's key the assistant can only
+message that agent's customers (and claims an Unassigned one on the
+first message); with an admin's key it can message anyone without
+changing who owns the customer.
+
 ## Safety
 
 Because sending WhatsApp messages is a real side effect, the server is

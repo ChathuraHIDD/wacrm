@@ -9,6 +9,49 @@ Versions follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Pre-1.0, `MINOR` bumps cover new modules; `PATCH` bumps cover bug fixes
 and polish.
 
+## [Unreleased] — BatteryLab
+
+Claim & Lock for the shared inbox: every customer is handled by exactly
+one sales agent. See [docs/claim-and-lock.md](./docs/claim-and-lock.md).
+
+> **Migration required:** apply `supabase/migrations/043_claim_and_lock.sql`
+> (after upstream's 040–042). Existing conversation assignments to
+> agents become customer owners. Assignments to owners/admins are
+> cleared and logged, because admins never own customers. Rollback:
+> `supabase/rollbacks/043_claim_and_lock.down.sql`. No new env vars.
+
+### Added
+
+- **Inbox tabs:** Unassigned / Mine / Team (admins: All / Unassigned /
+  Team, plus a filter by agent). Rows show the owner's name.
+- **Take this customer:** an atomic claim. If several agents press it at
+  once, exactly one wins, and the others are told who.
+- **An agent's first reply claims an Unassigned customer.** If they lose
+  the race, nothing is sent and their typed draft stays in the box.
+- **Lock:** other agents can read a claimed customer's chat, but can't
+  reply, react, close it or mark it read. They see
+  "🔒 *Name* is handling this customer".
+- **Admin replies:** admins reply to anyone with an **Admin** label and
+  never become the owner. Admins can assign, transfer or release
+  (agents only).
+- **Audit log** of every claim, assignment, transfer and release
+  (`contact_ownership_events`).
+- **Deals follow the owner:** open deals move on claim or transfer, so
+  "won" credit lands on the right agent.
+
+### Changed
+
+- **Every send path checks ownership before WhatsApp:** inbox, contact
+  page, `/api/v1/messages`, MCP, reactions and broadcasts. An agent's
+  broadcast skips teammates' customers.
+- **Public API keys act for their creator:** an admin's key replies
+  anywhere, and an agent's key follows agent rules.
+- **Bots only fill an empty owner slot, with an agent:** round-robin
+  automations, AI handoff and Flows handoff. Admins were removed from
+  the round-robin pool.
+- **Only owners/admins can change or reset the WhatsApp connection.**
+- **The media proxy no longer lets CDNs cache customer attachments.**
+
 ## [0.8.1] — 2026-07-10
 
 Fixes inbound chats fragmenting into multiple threads for the same

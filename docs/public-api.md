@@ -171,6 +171,20 @@ Domain error codes beyond the table above: `whatsapp_not_configured`
 (400), `meta_error` (502 — the request reached Meta and it rejected the
 send), `template_malformed` (500).
 
+**Claim & Lock.** A key acts for the member who created it, with that
+member's *current* role (see [claim-and-lock.md](./claim-and-lock.md)):
+
+- a key created by an **owner/admin** can message any customer; the
+  message is labelled "Admin" in the inbox and never changes who owns
+  the customer;
+- a key created by an **agent** can message customers that agent owns,
+  and messaging an Unassigned customer claims it for that agent;
+- anything else is refused before anything reaches WhatsApp:
+  `not_owner` (403 — another agent owns this customer),
+  `claimed_by_other` (409 — another agent claimed the customer a moment
+  before this send), `forbidden` (403 — the key's creator has left the
+  account or is a viewer; issue a new key).
+
 ### `GET /api/v1/contacts`
 
 List contacts, newest first. Scope: `contacts:read`. Paginated (see
@@ -252,7 +266,12 @@ curl -X POST https://your-crm.example.com/api/v1/broadcasts \
 Recipients are capped at **1000 per request** — split larger sends.
 Invalid phone numbers — including any without a leading `+` and country
 code — are dropped and counted as `rejected`; if none are valid the
-request fails with `400 bad_request`. Response (202):
+request fails with `400 bad_request`.
+
+Broadcasts never claim customers. A key created by an **agent** skips
+customers another agent owns (counted as `skipped_owned`; if every
+recipient is skipped the request fails with `403 forbidden`); an
+owner/admin's key reaches everyone. Response (202):
 
 ```json
 {
@@ -261,7 +280,8 @@ request fails with `400 bad_request`. Response (202):
     "status": "sending",
     "total_recipients": 2,
     "accepted": 2,
-    "rejected": 0
+    "rejected": 0,
+    "skipped_owned": 0
   }
 }
 ```
