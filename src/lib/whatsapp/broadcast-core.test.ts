@@ -5,6 +5,11 @@ import {
   finalizeBroadcastStatus,
   BroadcastError,
 } from './broadcast-core';
+import { findOrCreateContact } from '@/lib/api/v1/contacts';
+import type { SendActor } from '@/lib/ownership/permissions';
+
+// Admins broadcast to everyone — the default for tests about other things.
+const ADMIN: SendActor = { userId: 'admin-1', role: 'admin', claimVia: 'service' };
 
 // Contact resolution and token decryption are exercised elsewhere — stub
 // them so these tests focus on the persistence boundary.
@@ -23,6 +28,7 @@ describe('createBroadcast validation', () => {
   it('rejects a missing template_name', async () => {
     await expect(
       createBroadcast(db, 'acc', 'user', {
+        actor: ADMIN,
         templateName: '',
         recipients: [{ to: '+14155550123' }],
       })
@@ -32,6 +38,7 @@ describe('createBroadcast validation', () => {
   it('rejects an empty recipient list', async () => {
     await expect(
       createBroadcast(db, 'acc', 'user', {
+        actor: ADMIN,
         templateName: 'promo',
         recipients: [],
       })
@@ -43,7 +50,8 @@ describe('createBroadcast validation', () => {
       to: '+14155550123',
     }));
     await expect(
-      createBroadcast(db, 'acc', 'user', { templateName: 'promo', recipients })
+      createBroadcast(db, 'acc', 'user', {
+        actor: ADMIN, templateName: 'promo', recipients })
     ).rejects.toMatchObject({ status: 400 });
   });
 });
@@ -51,7 +59,11 @@ describe('createBroadcast validation', () => {
 // Build a Supabase-shaped mock that gets createBroadcast past its config +
 // template lookups and into persistence. `rpcResult` is what the atomic
 // create_broadcast_with_recipients RPC returns.
-function makeDb(rpcResult: { data: unknown; error: unknown }) {
+function makeDb(
+  rpcResult: { data: unknown; error: unknown },
+  /** contact id → owner (Claim & Lock); unlisted contacts are Unassigned. */
+  owners: Record<string, string | null> = {}
+) {
   const calls = {
     rpc: [] as { name: string; args: unknown }[],
     // Incremented if the OLD non-atomic path (a direct broadcasts /
@@ -78,6 +90,18 @@ function makeDb(rpcResult: { data: unknown; error: unknown }) {
           select: () => chain,
           eq: () => chain,
           maybeSingle: () => Promise.resolve({ data: null, error: null }),
+        };
+        return chain;
+      }
+      if (table === 'contacts') {
+        const chain = {
+          select: () => chain,
+          eq: () => chain,
+          in: (_col: string, ids: string[]) =>
+            Promise.resolve({
+              data: ids.map((id) => ({ id, owner_id: owners[id] ?? null })),
+              error: null,
+            }),
         };
         return chain;
       }
@@ -110,6 +134,7 @@ describe('createBroadcast recipient validation (#586)', () => {
     });
 
     const plan = await createBroadcast(db, 'acc', 'user', {
+        actor: ADMIN,
       templateName: 'promo',
       recipients: [
         { to: '4155551212' }, // US national → Meta would read +41 (Switzerland)
@@ -128,6 +153,7 @@ describe('createBroadcast recipient validation (#586)', () => {
     const { db, calls } = makeDb({ data: [], error: null });
     await expect(
       createBroadcast(db, 'acc', 'user', {
+        actor: ADMIN,
         templateName: 'promo',
         recipients: [{ to: '4155551212' }],
       })
@@ -144,6 +170,7 @@ describe('createBroadcast atomicity (#370)', () => {
     });
 
     const plan = await createBroadcast(db, 'acc', 'user', {
+        actor: ADMIN,
       templateName: 'promo',
       recipients: [{ to: '+14155550123' }],
     });
@@ -165,6 +192,7 @@ describe('createBroadcast atomicity (#370)', () => {
 
     await expect(
       createBroadcast(db, 'acc', 'user', {
+        actor: ADMIN,
         templateName: 'promo',
         recipients: [{ to: '+14155550123' }],
       })
@@ -175,6 +203,77 @@ describe('createBroadcast atomicity (#370)', () => {
     // there is no separate parent insert that could survive as an orphan.
     expect(calls.rpc).toHaveLength(1);
     expect(calls.usedDirectInsert).toBe(0);
+  });
+});
+
+describe('createBroadcast — Claim & Lock', () => {
+  const AGENT: SendActor = { userId: 'agent-me', role: 'agent', claimVia: 'service' };
+
+  function contactPerPhone() {
+    vi.mocked(findOrCreateContact).mockImplementation(async (_db, _acc, _user, input) => ({
+      id: `c-${String(input.phone).replace(/\D/g, '')}`,
+      created: false,
+    }));
+  }
+
+  it("skips a teammate's customer on an agent's broadcast and never claims", async () => {
+    contactPerPhone();
+    const { db, calls } = makeDb(
+      {
+        data: [
+          { broadcast_id: 'b-1', recipient_id: 'r-1', contact_id: 'c-14155550001' },
+          { broadcast_id: 'b-1', recipient_id: 'r-2', contact_id: 'c-14155550002' },
+        ],
+        error: null,
+      },
+      { 'c-14155550002': 'agent-me', 'c-14155550003': 'agent-gina' }
+    );
+
+    const plan = await createBroadcast(db, 'acc', 'user', {
+      actor: AGENT,
+      templateName: 'promo',
+      recipients: [
+        { to: '+14155550001' }, // Unassigned
+        { to: '+14155550002' }, // mine
+        { to: '+14155550003' }, // Gina's
+      ],
+    });
+
+    expect(plan.skippedOwned).toBe(1);
+    expect(calls.rpc).toHaveLength(1);
+    expect(calls.rpc[0].name).toBe('create_broadcast_with_recipients');
+    expect(calls.rpc[0].args).toMatchObject({
+      p_contact_ids: ['c-14155550001', 'c-14155550002'],
+      p_total_recipients: 2,
+    });
+  });
+
+  it("reaches a teammate's customer on an admin's broadcast", async () => {
+    contactPerPhone();
+    const { db, calls } = makeDb(
+      { data: [{ broadcast_id: 'b-1', recipient_id: 'r-1', contact_id: 'c-14155550003' }], error: null },
+      { 'c-14155550003': 'agent-gina' }
+    );
+    const plan = await createBroadcast(db, 'acc', 'user', {
+      actor: ADMIN,
+      templateName: 'promo',
+      recipients: [{ to: '+14155550003' }],
+    });
+    expect(plan.skippedOwned).toBe(0);
+    expect(calls.rpc[0].args).toMatchObject({ p_contact_ids: ['c-14155550003'] });
+  });
+
+  it('refuses with 403 when every recipient belongs to a teammate', async () => {
+    contactPerPhone();
+    const { db, calls } = makeDb({ data: [], error: null }, { 'c-14155550003': 'agent-gina' });
+    await expect(
+      createBroadcast(db, 'acc', 'user', {
+        actor: AGENT,
+        templateName: 'promo',
+        recipients: [{ to: '+14155550003' }],
+      })
+    ).rejects.toMatchObject({ status: 403 });
+    expect(calls.rpc).toHaveLength(0);
   });
 });
 

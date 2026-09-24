@@ -13,6 +13,7 @@ import {
 } from '@/lib/flows/meta-send'
 import { sendTypingIndicator } from '@/lib/whatsapp/meta-api'
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit'
+import { systemAssignContact } from '@/lib/ownership/claim'
 
 interface DispatchArgs {
   /** Tenancy key — drives config, contact, and whatsapp_config lookups. */
@@ -172,12 +173,19 @@ export async function dispatchInboundToAiReply(
         ai_autoreply_disabled: true,
         ai_handoff_summary: summary,
       }
-      // Only set the assignee when a target is configured AND the thread
-      // isn't already owned — never stomp an existing human assignment.
-      if (config.handoffAgentId && !conv.assigned_agent_id) {
-        update.assigned_agent_id = config.handoffAgentId
-      }
       await db.from('conversations').update(update).eq('id', conversationId)
+      // Route to the configured handoff agent through Claim & Lock: the
+      // bot never claims, it may only fill an EMPTY owner slot, and only
+      // with an agent (never an admin) — `system_assign_contact` enforces
+      // all three and logs it. The derived assignee fires the
+      // `on_conversation_assigned` notification.
+      if (config.handoffAgentId && !conv.assigned_agent_id) {
+        await systemAssignContact(db, {
+          contactId,
+          agentId: config.handoffAgentId,
+          source: 'ai_handoff',
+        })
+      }
       return
     }
 

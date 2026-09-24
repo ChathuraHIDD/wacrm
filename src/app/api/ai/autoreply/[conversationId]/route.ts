@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server'
 import { requireRole, toErrorResponse } from '@/lib/auth/account'
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
+import { canOwnCustomers, canSuperviseCustomers } from '@/lib/auth/roles'
+import { claimContact, OwnershipError, setContactOwner } from '@/lib/ownership/claim'
 
 type Params = { params: Promise<{ conversationId: string }> }
 
@@ -12,21 +14,23 @@ type Params = { params: Promise<{ conversationId: string }> }
  *
  * Body: { paused: boolean, assign_to_me?: boolean }
  *   - paused: true  → pause the bot here (a human is taking over). When
- *                     `assign_to_me` is set, also assign the thread to the
- *                     caller (the usual "Take over" flow). Assignment
- *                     fires the `on_conversation_assigned` trigger.
+ *                     `assign_to_me` is set and the caller is an agent,
+ *                     also CLAIM the customer (Claim & Lock, migration
+ *                     043) — atomically, so a lost race answers 409.
+ *                     Admins pause without owning.
  *   - paused: false → hand the thread back to the bot: clear the pause,
  *                     reset the per-conversation reply count so it gets
- *                     fresh slots, and clear the handoff note. If the
- *                     caller currently owns the thread, unassign it too so
- *                     the bot isn't blocked by the "human owns this" gate.
+ *                     fresh slots, and clear the handoff note. A claimed
+ *                     customer must be released first, and only an admin
+ *                     may release — so an admin's Resume releases, and an
+ *                     agent's Resume on a claimed customer is refused.
  *
  * Writes go through the RLS-scoped SSR client, so a conversation outside
  * the caller's account simply isn't found (404).
  */
 export async function POST(request: Request, { params }: Params) {
   try {
-    const { supabase, accountId, userId } = await requireRole('agent')
+    const { supabase, accountId, userId, role } = await requireRole('agent')
 
     // Reuse the send bucket: this is a cheap per-user inbox action and
     // toggling it in a tight loop has no legitimate use.
@@ -47,7 +51,7 @@ export async function POST(request: Request, { params }: Params) {
     // Confirm the conversation is in the caller's account before writing.
     const { data: conv, error: convErr } = await supabase
       .from('conversations')
-      .select('id')
+      .select('id, contact_id, contact:contacts(owner_id)')
       .eq('id', conversationId)
       .eq('account_id', accountId)
       .maybeSingle()
@@ -62,19 +66,65 @@ export async function POST(request: Request, { params }: Params) {
       return NextResponse.json({ error: 'Conversation not found' }, { status: 404 })
     }
 
+    const contact = Array.isArray(conv.contact) ? conv.contact[0] : conv.contact
+    const ownerId: string | null = contact?.owner_id ?? null
     const update: Record<string, unknown> = { ai_autoreply_disabled: paused }
 
-    if (paused) {
-      if (assignToMe) update.assigned_agent_id = userId
-    } else {
-      // Resuming hands the thread *back to the bot*. Clear the pause and
-      // the handoff note, and — crucially — release ANY assignment, not
-      // just the caller's own: the auto-reply eligibility gate stands
-      // down whenever a human is assigned, so leaving a stale assignee
-      // (e.g. the agent a prior handoff routed to) would silently keep
-      // the bot muted and make "Resume AI" a no-op. This is the explicit
-      // choice to let the bot own the thread again.
-      update.assigned_agent_id = null
+    // A teammate's customer is read-only for other agents (RLS would
+    // silently skip the update below — say so instead).
+    if (ownerId && ownerId !== userId && !canSuperviseCustomers(role)) {
+      return NextResponse.json(
+        { error: 'Another agent is handling this customer', code: 'not_owner' },
+        { status: 403 },
+      )
+    }
+
+    // Ownership changes go through the migration-043 functions; the
+    // conversation's assigned_agent_id is derived from them.
+    try {
+      if (paused && assignToMe && canOwnCustomers(role) && ownerId !== userId) {
+        const claim = await claimContact(supabase, {
+          contactId: conv.contact_id,
+          actor: { userId, role, claimVia: 'session' },
+          source: 'ai_takeover',
+        })
+        if (!claim.claimed) {
+          return NextResponse.json(
+            {
+              error: `${claim.ownerName ?? 'Another agent'} is already handling this customer`,
+              code: 'claimed_by_other',
+              owner_id: claim.ownerId,
+              owner_name: claim.ownerName,
+            },
+            { status: 409 },
+          )
+        }
+      }
+      if (!paused && ownerId) {
+        // The bot stands down while a human owns the customer, so
+        // resuming means releasing — which only an admin may do.
+        if (!canSuperviseCustomers(role)) {
+          return NextResponse.json(
+            { error: 'Only an admin can release this customer back to the AI assistant' },
+            { status: 403 },
+          )
+        }
+        await setContactOwner(supabase, {
+          contactId: conv.contact_id,
+          newOwnerId: null,
+          note: 'Resumed AI auto-reply',
+        })
+      }
+    } catch (err) {
+      if (err instanceof OwnershipError) {
+        return NextResponse.json({ error: err.message }, { status: err.status })
+      }
+      throw err
+    }
+
+    if (!paused) {
+      // Resuming hands the thread *back to the bot*: clear the pause and
+      // the handoff note (the release above removed any owner).
       // Give the bot a fresh reply budget on this thread. This is a
       // deliberate, manual, rate-limited action (not automatable), so it
       // can't be used to bypass the per-conversation cap at scale — it's

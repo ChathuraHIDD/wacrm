@@ -28,6 +28,8 @@ import {
 import { resolveTemplateRow } from '@/lib/whatsapp/template-body';
 import type { MessageTemplate } from '@/types';
 import { findOrCreateContact } from '@/lib/api/v1/contacts';
+import type { SendActor } from '@/lib/ownership/permissions';
+import { partitionByReach } from '@/lib/ownership/broadcast';
 
 /** Thrown by createBroadcast on a caller-visible failure; route maps it. */
 export class BroadcastError extends Error {
@@ -53,6 +55,12 @@ export interface CreateBroadcastParams {
   templateName: string;
   templateLanguage?: string | null;
   recipients: BroadcastRecipientInput[];
+  /**
+   * Who is broadcasting (Claim & Lock). An agent's broadcast skips
+   * customers a teammate owns; an admin's reaches everyone. Broadcasts
+   * never claim.
+   */
+  actor: SendActor;
 }
 
 interface PlannedRecipient {
@@ -71,6 +79,8 @@ export interface BroadcastPlan {
   planned: PlannedRecipient[];
   /** Phones rejected up front (invalid E.164) — counted as failed. */
   rejected: number;
+  /** Recipients skipped because a teammate owns the customer. */
+  skippedOwned: number;
 }
 
 const MAX_RECIPIENTS = 1000;
@@ -186,6 +196,35 @@ export async function createBroadcast(
     );
   }
 
+  // Claim & Lock: drop customers a teammate owns (unless an admin is
+  // broadcasting). They get no recipient row; the caller reports them.
+  const { data: ownerRows, error: ownerError } = await db
+    .from('contacts')
+    .select('id, owner_id')
+    .eq('account_id', accountId)
+    .in('id', deduped.map((r) => r.contactId));
+  if (ownerError) {
+    throw new BroadcastError('internal', 'Failed to load customer owners', 500);
+  }
+  const ownerByContact = new Map<string, string | null>(
+    ((ownerRows ?? []) as { id: string; owner_id: string | null }[]).map((r) => [
+      r.id,
+      r.owner_id,
+    ])
+  );
+  const { reachable, skipped } = partitionByReach(
+    deduped,
+    (r) => ownerByContact.get(r.contactId) ?? null,
+    params.actor
+  );
+  if (reachable.length === 0) {
+    throw new BroadcastError(
+      'forbidden',
+      'Every recipient is a customer another agent is handling',
+      403
+    );
+  }
+
   // Persist the broadcast + its recipients. The count columns
   // (sent/delivered/read/replied/failed) are owned by the DB aggregate
   // trigger (migrations 003/005) and derived purely from
@@ -209,11 +248,11 @@ export async function createBroadcast(
       p_name: name || `API broadcast (${templateName})`,
       p_template_name: templateName,
       p_template_language: resolvedTemplate.language,
-      p_total_recipients: deduped.length,
-      p_contact_ids: deduped.map((r) => r.contactId),
+      p_total_recipients: reachable.length,
+      p_contact_ids: reachable.map((r) => r.contactId),
       // Frozen per-recipient params (migration 038) — without them a
       // resume of this broadcast has no way to reconstruct {{1}}.
-      p_template_params: deduped.map((r) => r.params),
+      p_template_params: reachable.map((r) => r.params),
     }
   );
   if (createErr || !createdRows || createdRows.length === 0) {
@@ -225,7 +264,7 @@ export async function createBroadcast(
 
   // Pair each inserted recipient row back to its phone/params by
   // contact_id — unambiguous now that duplicates are collapsed.
-  const byContact = new Map(deduped.map((r) => [r.contactId, r]));
+  const byContact = new Map(reachable.map((r) => [r.contactId, r]));
   const planned: PlannedRecipient[] = createdRows.map(
     (row: { recipient_id: string; contact_id: string }) => {
       const r = byContact.get(row.contact_id)!;
@@ -242,6 +281,7 @@ export async function createBroadcast(
     templateRow,
     planned,
     rejected,
+    skippedOwned: skipped.length,
   };
 }
 

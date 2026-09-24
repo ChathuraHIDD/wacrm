@@ -15,6 +15,13 @@ import {
   rateLimitResponse,
   RATE_LIMITS,
 } from '@/lib/rate-limit'
+import { canSuperviseCustomers } from '@/lib/auth/roles'
+import { broadcastMayReach } from '@/lib/ownership/permissions'
+import {
+  loadOwnerNames,
+  loadOwnersByPhone,
+  skippedOwnedMessage,
+} from '@/lib/ownership/broadcast'
 
 interface BroadcastResult {
   phone: string
@@ -72,7 +79,7 @@ export async function POST(request: Request) {
     // to arbitrary phone numbers from the account's WhatsApp number.
     // Nothing about that is recoverable after the fact, so the check has
     // to happen here.
-    const { supabase, accountId, userId } = await requireRole('agent')
+    const { supabase, accountId, userId, role } = await requireRole('agent')
 
     // Per-user broadcast budget. Note: this limits how often a user
     // can *start* a campaign, not how many messages go out inside
@@ -160,12 +167,36 @@ export async function POST(request: Request) {
     }
     const templateRow = resolvedTemplate.row
 
+    // Claim & Lock: an agent's broadcast skips customers a teammate owns
+    // (reported as failed with the reason, so the campaign's recipient
+    // row explains it). Admins reach everyone. Broadcasts never claim.
+    const actor = { userId, role, claimVia: 'session' as const }
+    const ownersByPhone = canSuperviseCustomers(role)
+      ? new Map<string, string | null>()
+      : await loadOwnersByPhone(
+          supabase,
+          accountId,
+          recipients.map((r) => sanitizePhoneForMeta(r.phone))
+        )
+    const ownerNames = await loadOwnerNames(supabase, [...ownersByPhone.values()])
+
     const results: BroadcastResult[] = []
     let sentCount = 0
     let failedCount = 0
 
     for (const recipient of recipients) {
       const sanitized = sanitizePhoneForMeta(recipient.phone)
+
+      const ownerId = ownersByPhone.get(sanitized) ?? null
+      if (!broadcastMayReach(actor, ownerId)) {
+        results.push({
+          phone: recipient.phone,
+          status: 'failed',
+          error: skippedOwnedMessage(ownerId ? ownerNames.get(ownerId) : null),
+        })
+        failedCount++
+        continue
+      }
 
       if (!isValidE164(sanitized)) {
         results.push({

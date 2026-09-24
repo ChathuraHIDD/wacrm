@@ -42,6 +42,7 @@ import {
 import { decideFallback, resolveFallbackPolicy } from "./fallback";
 import { addContactTagAndDispatch } from "@/lib/contacts/tag-events";
 import { removeContactTag } from "@/lib/contacts/tag-write";
+import { systemAssignContact } from "@/lib/ownership/claim";
 import {
   type CollectInputNodeConfig,
   type ConditionNodeConfig,
@@ -482,16 +483,21 @@ async function executeHandoff(
   node: FlowNodeRow,
 ): Promise<void> {
   const cfg = node.config as { assign_to?: string; note?: string };
-  const convUpdate: Record<string, unknown> = {
-    status: "pending",
-    updated_at: new Date().toISOString(),
-  };
-  if (cfg.assign_to) convUpdate.assigned_agent_id = cfg.assign_to;
   if (run.conversation_id) {
     await db
       .from("conversations")
-      .update(convUpdate)
+      .update({ status: "pending", updated_at: new Date().toISOString() })
       .eq("id", run.conversation_id);
+  }
+  // Claim & Lock (migration 043): a flow may route an Unassigned
+  // customer to an agent, but never overrides an owner or assigns an
+  // admin. The conversation's assignee is derived from the owner.
+  if (cfg.assign_to && run.contact_id) {
+    await systemAssignContact(db, {
+      contactId: run.contact_id,
+      agentId: cfg.assign_to,
+      source: "flow_handoff",
+    });
   }
   await logEvent(db, run.id, "handoff", node.node_key, {
     note: cfg.note ?? null,

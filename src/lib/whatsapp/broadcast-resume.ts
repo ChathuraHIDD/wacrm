@@ -22,6 +22,12 @@ import { BroadcastError, type BroadcastPlan } from '@/lib/whatsapp/broadcast-cor
 import { decrypt } from '@/lib/whatsapp/encryption';
 import { resolveTemplateRow } from '@/lib/whatsapp/template-body';
 import { sanitizePhoneForMeta, isValidE164 } from '@/lib/whatsapp/phone-utils';
+import type { SendActor } from '@/lib/ownership/permissions';
+import {
+  loadOwnerNames,
+  partitionByReach,
+  skippedOwnedMessage,
+} from '@/lib/ownership/broadcast';
 
 /** Which recipients a resume pass picks up. */
 export type ResumeScope = 'pending' | 'failed' | 'all';
@@ -113,18 +119,31 @@ export interface ResumePlan {
    * they stop blocking the broadcast's terminal status.
    */
   unsendable: number;
+  /**
+   * In-scope rows skipped because a teammate owns the customer (Claim &
+   * Lock) — stamped 'failed' with the reason, like `unsendable`.
+   */
+  skippedOwned: number;
+}
+
+interface RecipientContact {
+  phone?: string | null;
+  owner_id?: string | null;
 }
 
 interface RecipientRow {
   id: string;
   template_params: unknown;
-  contact: { phone?: string | null } | { phone?: string | null }[] | null;
+  contact: RecipientContact | RecipientContact[] | null;
 }
 
 /** Supabase renders an embedded to-one join as an object or a 1-array. */
+function recipientContact(row: RecipientRow): RecipientContact | null {
+  return (Array.isArray(row.contact) ? row.contact[0] : row.contact) ?? null;
+}
+
 function contactPhone(row: RecipientRow): string | null {
-  const c = Array.isArray(row.contact) ? row.contact[0] : row.contact;
-  return c?.phone ?? null;
+  return recipientContact(row)?.phone ?? null;
 }
 
 /**
@@ -142,7 +161,9 @@ export async function planBroadcastResume(
   db: SupabaseClient,
   accountId: string,
   broadcastId: string,
-  scope: ResumeScope
+  scope: ResumeScope,
+  /** Who is resuming — an agent's resume skips teammates' customers. */
+  actor: SendActor
 ): Promise<ResumePlan> {
   const { data: broadcast, error: bcError } = await db
     .from('broadcasts')
@@ -158,7 +179,7 @@ export async function planBroadcastResume(
   const statuses = scopeStatuses(scope);
   const { data: rawRows, error: recError } = await db
     .from('broadcast_recipients')
-    .select('id, template_params, contact:contacts(phone)')
+    .select('id, template_params, contact:contacts(phone, owner_id)')
     .eq('broadcast_id', broadcastId)
     .in('status', statuses)
     // Oldest first, so repeated capped passes chew through the backlog
@@ -170,7 +191,32 @@ export async function planBroadcastResume(
     throw new BroadcastError('internal', 'Failed to load recipients', 500);
   }
 
-  const rows = (rawRows ?? []) as RecipientRow[];
+  const allRows = (rawRows ?? []) as RecipientRow[];
+
+  // Claim & Lock: never message a teammate's customer on an agent's
+  // behalf. Stamp them failed with the reason so they stop counting as
+  // outstanding.
+  const { reachable: rows, skipped } = partitionByReach(
+    allRows,
+    (row) => recipientContact(row)?.owner_id ?? null,
+    actor
+  );
+  if (skipped.length > 0) {
+    const names = await loadOwnerNames(
+      db,
+      skipped.map((row) => recipientContact(row)?.owner_id ?? null)
+    );
+    for (const row of skipped) {
+      const ownerId = recipientContact(row)?.owner_id ?? null;
+      await db
+        .from('broadcast_recipients')
+        .update({
+          status: 'failed',
+          error_message: skippedOwnedMessage(ownerId ? names.get(ownerId) : null),
+        })
+        .eq('id', row.id);
+    }
+  }
 
   // A recipient whose contact has no usable phone can never send. Stamp
   // it failed now: leaving it 'pending' would keep the broadcast in
@@ -247,9 +293,15 @@ export async function planBroadcastResume(
         : [],
     })),
     rejected: 0,
+    skippedOwned: skipped.length,
   };
 
-  return { plan, remaining, unsendable: unsendable.length };
+  return {
+    plan,
+    remaining,
+    unsendable: unsendable.length,
+    skippedOwned: skipped.length,
+  };
 }
 
 /**

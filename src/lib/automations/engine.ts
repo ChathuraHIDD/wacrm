@@ -20,6 +20,7 @@ import type {
 } from '@/types'
 import { supabaseAdmin } from './admin-client'
 import { pickRoundRobinAgent } from './assign'
+import { systemAssignContact } from '@/lib/ownership/claim'
 import { addContactTagIfAbsent } from '@/lib/contacts/tag-write'
 import { MAX_TAG_CHAIN_DEPTH, getTagChainDepth } from '@/lib/contacts/tag-chain'
 import { engineSendText, engineSendTemplate, engineSendInteractive } from './meta-send'
@@ -486,18 +487,24 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
       if (!args.contactId) throw new Error('assign_conversation needs a contact')
       let agentId = cfg.agent_id
       if (cfg.mode === 'round_robin') {
-        // Load-balanced round-robin across the account's assignable
-        // members (owner / admin / agent). See ./assign.ts.
+        // Load-balanced round-robin across the account's agents. See
+        // ./assign.ts.
         agentId =
           (await pickRoundRobinAgent(db, args.automation.account_id)) ?? undefined
       }
       if (!agentId) return 'no agent resolved'
-      await db
-        .from('conversations')
-        .update({ assigned_agent_id: agentId })
-        .eq('account_id', args.automation.account_id)
-        .eq('contact_id', args.contactId)
-      return `assigned to ${agentId}`
+      // Claim & Lock (migration 043): automations never override an owner
+      // and only ever assign an agent. system_assign_contact enforces both
+      // atomically and writes the audit log; the conversation's assignee
+      // is derived from the contact's owner.
+      const assigned = await systemAssignContact(db, {
+        contactId: args.contactId,
+        agentId,
+        source: 'round_robin',
+      })
+      return assigned
+        ? `assigned to ${agentId}`
+        : 'skipped: customer already has an owner (or the target is not an agent)'
     }
 
     case 'update_contact_field': {

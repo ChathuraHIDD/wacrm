@@ -51,7 +51,7 @@ export async function POST(
     // Same gate as the batch send endpoint: running a broadcast is a
     // write, and viewers are read-only. Resuming is no different — it
     // puts real messages on real phones.
-    const { supabase, accountId, userId } = await requireRole('agent');
+    const { supabase, accountId, userId, role } = await requireRole('agent');
 
     const limit = checkRateLimit(
       `broadcast-resume:${userId}`,
@@ -82,12 +82,12 @@ export async function POST(
     }
     claimedId = id;
 
-    const { plan, remaining, unsendable } = await planBroadcastResume(
-      supabase,
-      accountId,
-      id,
-      scope
-    );
+    const { plan, remaining, unsendable, skippedOwned } =
+      await planBroadcastResume(supabase, accountId, id, scope, {
+        userId,
+        role,
+        claimVia: 'session',
+      });
 
     await markBroadcastSending(supabase, id);
     claimedId = null; // ownership passes to the after() block
@@ -122,6 +122,8 @@ export async function POST(
         remaining,
         // Recipients stamped failed up front for want of a phone number.
         unsendable,
+        // Recipients skipped because a teammate owns the customer.
+        skipped_owned: skippedOwned,
       },
       { status: 202 }
     );

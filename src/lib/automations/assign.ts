@@ -9,7 +9,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 // team instead.
 //
 // "Round-robin" here is *load-balanced*, not a strict rotation:
-// among the account's assignable members (owner / admin / agent —
+// among the account's agents (owners/admins never own customers,
 // viewers are read-only), pick whoever is currently carrying the
 // fewest OPEN conversations. Ties break toward the agent whose most
 // recent conversation is oldest, so a cold start (everyone at zero)
@@ -20,8 +20,11 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 // without a database.
 // ------------------------------------------------------------
 
-/** Account roles whose members may own a conversation. */
-export const ASSIGNABLE_ROLES = ['owner', 'admin', 'agent'] as const
+/**
+ * Account roles whose members may own a customer. Claim & Lock
+ * (migration 043): only agents — owners/admins supervise, never own.
+ */
+export const ASSIGNABLE_ROLES = ['agent'] as const
 
 /** Minimal shape of an open conversation used for load balancing. */
 export interface OpenConversationRow {

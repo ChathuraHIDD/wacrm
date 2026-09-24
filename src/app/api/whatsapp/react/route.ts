@@ -3,6 +3,7 @@ import { requireRole, toErrorResponse } from '@/lib/auth/account';
 import { sendReactionMessage } from '@/lib/whatsapp/meta-api';
 import { decrypt } from '@/lib/whatsapp/encryption';
 import { resolveContactSendTarget } from '@/lib/whatsapp/wa-identity';
+import { canActWithoutClaim } from '@/lib/ownership/permissions';
 import {
   checkRateLimit,
   rateLimitResponse,
@@ -24,7 +25,7 @@ export async function POST(request: Request) {
     // reaction to Meta before mirroring it locally — so, as on /send, a
     // missing role check let a read-only viewer put a visible reaction on
     // the customer's message even though RLS blocked the local mirror.
-    const { supabase, accountId, userId } = await requireRole('agent');
+    const { supabase, accountId, userId, role } = await requireRole('agent');
 
     const limit = checkRateLimit(`react:${userId}`, RATE_LIMITS.react);
     if (!limit.success) {
@@ -66,7 +67,7 @@ export async function POST(request: Request) {
 
     const { data: conversation, error: convError } = await supabase
       .from('conversations')
-      .select('id, account_id, contact:contacts(phone, wa_user_id)')
+      .select('id, account_id, contact:contacts(phone, wa_user_id, owner_id)')
       .eq('id', targetMessage.conversation_id)
       .eq('account_id', accountId)
       .maybeSingle();
@@ -83,6 +84,27 @@ export async function POST(request: Request) {
       : conversation.contact;
     // Phone number, or the business-scoped user ID for a contact Meta
     // never gave us a number for (issue #519).
+
+    // Claim & Lock: a reaction reaches the customer, so it needs the same
+    // right as a reply — but it never claims. An agent must own the
+    // customer first (take it, or reply); admins may always.
+    if (
+      !canActWithoutClaim(
+        { userId, role, claimVia: 'session' },
+        contact?.owner_id ?? null,
+      )
+    ) {
+      return NextResponse.json(
+        {
+          error: contact?.owner_id
+            ? 'Another agent is handling this customer'
+            : 'Take this customer before reacting',
+          code: 'not_owner',
+        },
+        { status: 403 },
+      );
+    }
+
     const sendTarget = resolveContactSendTarget(contact);
     if (!sendTarget) {
       return NextResponse.json(

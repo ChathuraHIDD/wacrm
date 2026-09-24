@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { BroadcastError } from './broadcast-core';
+import type { SendActor } from '@/lib/ownership/permissions';
 import {
   claimBroadcastDelivery,
   planBroadcastResume,
@@ -176,13 +177,17 @@ function recipient(
   id: string,
   phone: string | null,
   params: unknown = ['A123'],
+  ownerId: string | null = null,
 ) {
   return {
     id,
     template_params: params,
-    contact: phone ? { phone } : null,
+    contact: phone ? { phone, owner_id: ownerId } : null,
   };
 }
+
+// Admins resume for everyone; ownership skipping has its own tests below.
+const ADMIN_ACTOR: SendActor = { userId: 'admin-1', role: 'admin', claimVia: 'session' };
 
 describe('planBroadcastResume', () => {
   it('plans the outstanding recipients with their frozen params', async () => {
@@ -201,7 +206,7 @@ describe('planBroadcastResume', () => {
       ),
       'acct-1',
       'bc-1',
-      'pending',
+      'pending', ADMIN_ACTOR
     );
 
     expect(writes.statusFilter).toEqual(['pending']);
@@ -238,7 +243,7 @@ describe('planBroadcastResume', () => {
       ),
       'acct-1',
       'bc-1',
-      'failed',
+      'failed', ADMIN_ACTOR
     );
     expect(failedWrites.statusFilter).toEqual(['failed']);
 
@@ -254,7 +259,7 @@ describe('planBroadcastResume', () => {
       ),
       'acct-1',
       'bc-1',
-      'all',
+      'all', ADMIN_ACTOR
     );
     expect(allWrites.statusFilter).toEqual(['pending', 'failed']);
   });
@@ -272,7 +277,7 @@ describe('planBroadcastResume', () => {
       }),
       'acct-1',
       'bc-1',
-      'pending',
+      'pending', ADMIN_ACTOR
     );
     expect(plan.planned.map((p) => p.params)).toEqual([[], []]);
   });
@@ -294,7 +299,7 @@ describe('planBroadcastResume', () => {
       ),
       'acct-1',
       'bc-1',
-      'pending',
+      'pending', ADMIN_ACTOR
     );
 
     // Left 'pending', these would keep the broadcast in 'sending'
@@ -313,7 +318,7 @@ describe('planBroadcastResume', () => {
       planDb({ broadcast: BROADCAST, config: CONFIG, recipients: many }),
       'acct-1',
       'bc-1',
-      'pending',
+      'pending', ADMIN_ACTOR
     );
     expect(plan.planned).toHaveLength(RESUME_MAX_PER_REQUEST);
     // Surfaced to the caller rather than silently dropped.
@@ -326,7 +331,7 @@ describe('planBroadcastResume', () => {
         planDb({ broadcast: null }),
         'acct-1',
         'bc-1',
-        'pending',
+        'pending', ADMIN_ACTOR
       ),
     ).rejects.toMatchObject({ status: 404 });
   });
@@ -337,7 +342,7 @@ describe('planBroadcastResume', () => {
         planDb({ broadcast: BROADCAST, config: CONFIG, recipients: [] }),
         'acct-1',
         'bc-1',
-        'failed',
+        'failed', ADMIN_ACTOR
       ),
     ).rejects.toBeInstanceOf(BroadcastError);
   });
@@ -361,8 +366,57 @@ describe('planBroadcastResume', () => {
       }),
       'acct-1',
       'bc-1',
-      'pending',
+      'pending', ADMIN_ACTOR
     );
     expect(plan.templateRow?.language).toBe('en');
+  });
+});
+
+describe('planBroadcastResume — Claim & Lock', () => {
+  const AGENT: SendActor = { userId: 'agent-me', role: 'agent', claimVia: 'session' };
+
+  it("skips a teammate's customer on an agent's resume and stamps the reason", async () => {
+    const writes: PlanWrites = {};
+    const { plan, skippedOwned } = await planBroadcastResume(
+      planDb(
+        {
+          broadcast: BROADCAST,
+          config: CONFIG,
+          recipients: [
+            recipient('r1', '+15551234567', ['A'], null),
+            recipient('r2', '+15559876543', ['B'], 'agent-me'),
+            recipient('r3', '+15550001111', ['C'], 'agent-gina'),
+          ],
+        },
+        writes,
+      ),
+      'acct-1',
+      'bc-1',
+      'pending',
+      AGENT,
+    );
+
+    expect(skippedOwned).toBe(1);
+    expect(plan.planned.map((r) => r.recipientRowId)).toEqual(['r1', 'r2']);
+    expect(writes.failedUpdate).toMatchObject({
+      status: 'failed',
+      error_message: expect.stringMatching(/^Skipped: .* is handling this customer$/),
+    });
+  });
+
+  it("resumes everyone on an admin's resume", async () => {
+    const { plan, skippedOwned } = await planBroadcastResume(
+      planDb({
+        broadcast: BROADCAST,
+        config: CONFIG,
+        recipients: [recipient('r3', '+15550001111', ['C'], 'agent-gina')],
+      }),
+      'acct-1',
+      'bc-1',
+      'pending',
+      ADMIN_ACTOR,
+    );
+    expect(skippedOwned).toBe(0);
+    expect(plan.planned).toHaveLength(1);
   });
 });

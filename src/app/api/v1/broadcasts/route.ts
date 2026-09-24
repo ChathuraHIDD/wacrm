@@ -37,6 +37,7 @@ import { requireApiKey } from '@/lib/auth/api-context';
 export const maxDuration = 60;
 import { ok, fail, toApiErrorResponse } from '@/lib/api/v1/respond';
 import { resolveAuditUserId, ContactError } from '@/lib/api/v1/contacts';
+import { actorForApiKey } from '@/lib/ownership/claim';
 import {
   createBroadcast,
   deliverBroadcast,
@@ -72,6 +73,12 @@ export async function POST(request: Request) {
         to: typeof r?.to === 'string' ? r.to : '',
         params: Array.isArray(r?.params) ? r.params : undefined,
       })),
+      // Claim & Lock: the key acts for its creator; an agent's key skips
+      // customers a teammate owns.
+      actor: await actorForApiKey(ctx.supabase, {
+        accountId: ctx.accountId,
+        createdBy: ctx.createdBy,
+      }),
     });
 
     // Fan out after the response is sent. Uses the same service-role
@@ -86,6 +93,7 @@ export async function POST(request: Request) {
         total_recipients: plan.planned.length,
         accepted: plan.planned.length,
         rejected: plan.rejected,
+        skipped_owned: plan.skippedOwned,
       },
       202
     );

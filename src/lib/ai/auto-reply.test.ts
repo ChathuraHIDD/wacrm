@@ -285,9 +285,14 @@ describe('dispatchInboundToAiReply — handoff', () => {
     h.loadAiConfig.mockResolvedValue(aiConfig({ handoffAgentId: 'agent-7' }))
     h.generateReply.mockResolvedValue({ text: '', handoff: true })
     await dispatchInboundToAiReply(ARGS)
-    expect(h.state.updatePayload).toMatchObject({
-      ai_autoreply_disabled: true,
-      assigned_agent_id: 'agent-7',
+    expect(h.state.updatePayload).toMatchObject({ ai_autoreply_disabled: true })
+    // Claim & Lock: the bot never writes the assignee directly — it asks
+    // system_assign_contact, which only fills an empty owner slot with an
+    // agent and logs it.
+    expect(h.state.updatePayload).not.toHaveProperty('assigned_agent_id')
+    expect(h.state.rpcCalls).toContainEqual({
+      name: 'system_assign_contact',
+      args: { p_contact_id: 'contact-1', p_agent_id: 'agent-7', p_source: 'ai_handoff' },
     })
   })
 })
